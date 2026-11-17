@@ -1,5 +1,6 @@
-NJ ESTIMATE FOR IPHONE  -  version 1.0.0  (November 16, 2026)
-=================================================================
+SUPPORT CALCULATOR FOR IPHONE  -  version 1.0.1  (November 17, 2026)
+=====================================================================
+(1.0.0 was called "NJ Estimate".)
 
 WHAT IT IS
   A web app that is added to the iPhone home screen (teal icon with scales and
@@ -48,7 +49,25 @@ B. ADD IT TO EACH IPHONE
 ------------------------
   1. Open the address from A.4 in SAFARI.
   2. Tap the Share button -> "Add to Home Screen" -> Add.
-  3. Open NJ Estimate from the home-screen icon. That's all.
+  3. Open Support Calculator from the home-screen icon. That's all.
+     (The iPhone may shorten the name under the icon; you can type a shorter
+     one, e.g. "Support Calc", in the Add to Home Screen box.)
+
+
+IF IT DOESN'T START
+-------------------
+  From 1.0.1 a red box at the top says what went wrong, e.g.
+  "js/engine.js could not be loaded from the web site", with a button
+  "Repair and reload" (it clears the app's saved copy on the phone and loads
+  it fresh; what was typed is kept).
+  * "... could not be loaded from the web site": that file is missing from
+    the repository. On GitHub, open the repository: it must show the folders
+    js and icons at the top level, beside index.html, and js must hold
+    app.js, engine.js and tables.js. Upload what is missing ("Add file" ->
+    "Upload files", drag the js folder), wait a minute, then tap Repair.
+    Check: https://yourname.github.io/nj-estimate/js/engine.js  should show
+    program text in Safari, not "404".
+  * Any other message: send Claude the exact text in the red box.
 
 
 EVERYDAY USE
@@ -84,8 +103,7 @@ UPDATES
          (rewrites js\tables.js from Family Cases' figures and tables)
     2. python tests\parity.py  <path to the family folder>
          (must say "0 differ")
-    3. Raise VERSION in sw.js (e.g. nj-estimate-1.0.1) and the version in
+    3. Raise VERSION in sw.js (e.g. nj-estimate-1.0.2) and the version in
        js\app.js, then upload the changed files to the repository
-       ("Add file" -> "Upload files").
-  The phones pick up the new version the next time the app is opened online
-  (it may take one more opening).
+       ("Add file" -> "Upload files"; drag a folder to keep it, e.g. js).
+  The phones get the new version the next time the app is opened online.

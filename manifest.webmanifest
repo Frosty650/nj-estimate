@@ -1,6 +1,6 @@
 {
-  "name": "NJ Estimate",
-  "short_name": "NJ Estimate",
+  "name": "Support Calculator",
+  "short_name": "Support Calc",
   "description": "Quick New Jersey child support and alimony estimates",
   "start_url": "./",
   "scope": "./",
