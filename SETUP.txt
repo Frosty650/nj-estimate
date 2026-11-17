@@ -1,0 +1,91 @@
+NJ ESTIMATE FOR IPHONE  -  version 1.0.0  (November 16, 2026)
+=================================================================
+
+WHAT IT IS
+  A web app that is added to the iPhone home screen (teal icon with scales and
+  a dollar coin). It gives a quick New Jersey child support estimate (Simple or
+  Full detail) and the rule-of-thumb alimony figures - the same calculation as
+  the quick estimate in Family Cases on the office computers, checked against it
+  line by line.
+
+  * No sign-in, no Dropbox, nothing to set up on the phone.
+  * Nothing typed leaves the phone. The last estimate stays on the phone until
+    "Start over" is tapped.
+  * Works without a connection once it has been opened.
+  * The worksheet can be viewed, shared (Mail, Messages, AirDrop ...), copied
+    or printed.
+
+WHAT'S IN THIS FOLDER (all of it goes on the web site)
+  index.html, app.css, manifest.webmanifest, sw.js
+  js\       the program (app.js, engine.js, tables.js)
+  icons\    the icons
+  tools\    used on a computer to remake tables.js and the icons (harmless on the site)
+  tests\    checks run on a computer (harmless on the site)
+  SETUP.txt, HOW-IT-WORKS.md   (harmless on the site)
+
+Two one-time jobs: (A) put it on a free GitHub web site, (B) add it to each phone.
+
+
+A. PUT THE APP ON A GITHUB WEB SITE  (once, about 5 minutes)
+------------------------------------------------------------
+  Use the same GitHub account as Activity Entry - this is just a second
+  repository beside it.
+  1. Sign in at  https://github.com
+  2. Click "+" (top right) -> "New repository".
+       - Repository name:  nj-estimate
+       - Public  (free web sites need a public repository; it holds only the
+         program and the court's published tables - no client data)
+       - Create repository.
+  3. On the new repository page click "uploading an existing file". Drag ALL the
+     files and the  js, icons, tools  and  tests  folders from this folder onto
+     the page (Chrome or Edge keep the folders). Click "Commit changes".
+  4. Settings -> Pages:  Source "Deploy from a branch", Branch "main", folder
+     "/ (root)", Save. After a minute the page shows the address, e.g.
+         https://yourname.github.io/nj-estimate/
+
+
+B. ADD IT TO EACH IPHONE
+------------------------
+  1. Open the address from A.4 in SAFARI.
+  2. Tap the Share button -> "Add to Home Screen" -> Add.
+  3. Open NJ Estimate from the home-screen icon. That's all.
+
+
+EVERYDAY USE
+------------
+  Child support (Simple)
+    1 Tap the number of children, then type each age (or tap "Birth date").
+    2 Type what each parent earns before tax, and pick a year / a month / a week.
+    3 Tap who the children live with mainly, then an arrangement (e.g. "Every
+      other weekend" = 100 overnights), or type the overnights.
+    The estimate shows at once - also in the bar at the bottom while you type -
+    with "What would change it" and what was "Assumed".
+  Full detail
+    The adjustments for either parent (alimony, taxes typed from a return,
+    other children, benefits, child care, health insurance, household), the
+    worksheet and custodial parent, parenting plan, the initial order date
+    (teenage adjustment), a deviation, and the names to show on the worksheet.
+    Back in Simple, a yellow note says when Full detail still holds something
+    that counts.
+  See the worksheet
+    The full IX-C / IX-D worksheet with comments and notes. Share sends it as
+    text; Print prints it.
+  Alimony
+    Starts from the incomes typed for child support (blue); type over either one.
+  Start over
+    Clears everything on this phone.
+
+
+UPDATES
+-------
+  When the guidelines change (the yearly check in May finds a new Notice to
+  the Bar), Family Cases is updated first. Then, on a computer:
+    1. python tools\make_tables.py  <path to the family folder>
+         (rewrites js\tables.js from Family Cases' figures and tables)
+    2. python tests\parity.py  <path to the family folder>
+         (must say "0 differ")
+    3. Raise VERSION in sw.js (e.g. nj-estimate-1.0.1) and the version in
+       js\app.js, then upload the changed files to the repository
+       ("Add file" -> "Upload files").
+  The phones pick up the new version the next time the app is opened online
+  (it may take one more opening).

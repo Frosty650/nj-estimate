@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="NJ Estimate">
+<meta name="theme-color" content="#F5F7FA">
+<meta name="format-detection" content="telephone=no">
+<title>NJ Estimate</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<link rel="icon" type="image/png" href="icons/favicon-64.png">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<header class="top">
+  <div>
+    <h1 id="pageTitle">Child support</h1>
+    <div id="pageSub" class="sub"></div>
+  </div>
+  <button id="clearBtn" class="pill plain">Start over</button>
+</header>
+
+<!-- ============ child support ============ -->
+<section id="tab-support" class="page">
+  <div class="seg modeseg" id="mode"><button data-v="simple" class="on">Simple</button><button data-v="full">Full detail</button></div>
+
+  <div class="card">
+    <div class="ctitle">1. How many children, and how old?</div>
+    <div class="chips" id="kidCount"></div>
+    <div id="kids"></div>
+    <div class="hint">Type an age, or tap <i>Birth date</i>. Turn off <i>Counted</i> for a child outside the guidelines
+      (18 or over and out of high school).</div>
+  </div>
+
+  <div class="card">
+    <div class="ctitle">2. What does each parent earn, before tax?</div>
+    <div id="earn"></div>
+    <div id="weekHint" class="hint hidden"></div>
+  </div>
+
+  <div class="card">
+    <div class="ctitle">3. How much time do the children spend with each parent?</div>
+    <div class="lbl">THE CHILDREN LIVE MAINLY WITH</div>
+    <div class="seg" id="mainWith"><button data-v="client" class="on">Client</button><button data-v="other">Other party</button></div>
+    <div class="lbl mt" id="presetLbl">WITH OTHER PARTY</div>
+    <div class="presets" id="presets"></div>
+    <div class="two mt" id="nights"></div>
+    <div class="hint">A button fills in both numbers. Type over either one; the two need not add up to 365.</div>
+  </div>
+
+  <div id="fullCards" class="hidden">
+    <div class="card">
+      <div class="ctitle">4. Adjustments</div>
+      <div class="seg" id="adjWho"><button data-v="client" class="on">Client</button><button data-v="other">Other party</button></div>
+      <div id="adj"></div>
+      <div class="hint">Weekly amounts unless marked yearly.</div>
+    </div>
+    <div class="card">
+      <div class="ctitle">How it is worked out</div>
+      <div id="settings"></div>
+    </div>
+  </div>
+
+  <div id="hiddenNote" class="banner warn hidden"></div>
+  <div id="switchBox" class="dashed">
+    <div>Alimony, child care, health insurance, other children, or taxes typed from a return?</div>
+    <button id="toFull" class="btn secondary">Switch to Full detail</button>
+  </div>
+
+  <div id="result" class="resultbox">
+    <div class="rcap">ESTIMATE</div>
+    <div id="big" class="rbig">–</div>
+    <div id="summary" class="rsub"></div>
+    <div class="rbtns">
+      <button id="sheetBtn" class="rbtn">See the worksheet</button>
+      <button id="shareBtn" class="rbtn">Share</button>
+    </div>
+  </div>
+  <div id="check" class="banner warn hidden"></div>
+  <div id="whatifCard" class="card hidden">
+    <div class="ctitle">What would change it</div>
+    <div id="whatif"></div>
+  </div>
+  <div class="card">
+    <div class="ctitle">Assumed</div>
+    <div id="assumed" class="small"></div>
+  </div>
+  <div class="spacer"></div>
+</section>
+
+<!-- ============ alimony ============ -->
+<section id="tab-alimony" class="page hidden">
+  <div class="banner warn">New Jersey has no formula for alimony – the court weighs the statutory factors. These are sample
+    figures by a rule of thumb, for discussion: 20%, 25% and 30% of the difference between the two gross incomes.</div>
+  <div class="card">
+    <div class="ctitle">Gross income of each party</div>
+    <div id="alEarn"></div>
+    <button id="alFrom" class="linkbtn">Use the figures from the child support estimate</button>
+    <div class="hint">Before tax. Filled from the child support estimate (blue) when it has them; type over either figure.</div>
+  </div>
+  <div class="card">
+    <div class="ctitle">Sample alimony</div>
+    <div id="alDiff" class="big2"></div>
+    <div id="alWho" class="hint"></div>
+    <table class="altable" id="alTable"></table>
+    <button id="alShare" class="btn secondary wide">Share</button>
+  </div>
+  <div class="spacer"></div>
+</section>
+
+<!-- ============ about ============ -->
+<section id="tab-about" class="page hidden">
+  <div class="card">
+    <img src="icons/logo.png" alt="" class="about-icon">
+    <div class="ctitle center">NJ Estimate</div>
+    <div class="small" id="aboutText"></div>
+  </div>
+  <div class="spacer"></div>
+</section>
+
+<nav class="tabs">
+  <button data-tab="support" class="on"><span class="ic">⚖︎</span>Child support</button>
+  <button data-tab="alimony"><span class="ic">％</span>Alimony</button>
+  <button data-tab="about"><span class="ic">ⓘ</span>About</button>
+</nav>
+
+<!-- result bar (child support): stays in view while the figures are typed -->
+<button id="bar" class="bar hidden"><span id="barBig"></span><span id="barSub"></span></button>
+
+<!-- worksheet -->
+<div id="sheet" class="sheet hidden">
+  <div class="sheet-card">
+    <div class="sheet-head"><b id="sheetTitle">Worksheet</b><button id="sheetClose" class="linkbtn">Done</button></div>
+    <div id="sheetBody" class="sheet-body"></div>
+    <div class="sheet-btns">
+      <button id="sheetShare" class="btn save">Share</button>
+      <button id="sheetCopy" class="btn secondary">Copy</button>
+      <button id="sheetPrint" class="btn secondary">Print</button>
+    </div>
+  </div>
+</div>
+<pre id="printText" class="print-only"></pre>
+
+<div id="dialog" class="dialog hidden">
+  <div class="dialog-card">
+    <div id="dialogTitle" class="dialog-title"></div>
+    <div id="dialogBody" class="dialog-body"></div>
+    <div id="dialogBtns" class="dialog-btns"></div>
+  </div>
+</div>
+<div id="toast" class="toast hidden"></div>
+
+<script src="js/tables.js"></script>
+<script src="js/engine.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
