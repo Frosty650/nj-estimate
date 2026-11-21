@@ -3,8 +3,8 @@
    offline is the saved copy used. So a stale or incomplete saved copy can't be served while online.
    Shares its web address (yourname.github.io) with Activity Entry: it removes only its own old caches. */
 const PREFIX = "nj-estimate-";
-const VERSION = PREFIX + "1.0.1";
-const FILES = ["./", "index.html", "app.css", "manifest.webmanifest", "js/app.js", "js/engine.js", "js/tables.js",
+const VERSION = PREFIX + "1.2.0";
+const FILES = ["./", "index.html", "app.css", "manifest.webmanifest", "js/app.js", "js/engine.js", "js/engine-ny.js", "js/tables.js",
   "icons/icon-180.png", "icons/icon-192.png", "icons/icon-512.png", "icons/favicon-64.png", "icons/logo.png"];
 
 self.addEventListener("install", (ev) => {
