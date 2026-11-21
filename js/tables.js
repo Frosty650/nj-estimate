@@ -1,5 +1,5 @@
-/* NJ Estimate - the dated NJ child support figures and tables. MADE BY tools/make_tables.py from
-   Family Cases (fc_figures.py NJ_SETS and data/*.csv): do not edit by hand. */
+/* Support Calculator - the dated NJ child support figures and tables, and the NY figures. MADE BY tools/make_tables.py from
+   Family Cases (fc_figures.py NJ_SETS, data/*.csv, fc_nysupport.py NY_SETS): do not edit by hand. */
 (function (root) {
   const NJ_DATA = {
     sets: [{"effective": "2026-06-01", "source": "Notice to the Bar, Supreme Court order of March 31, 2026 (effective June 1, 2026); IX-A, IX-B, IX-E and IX-H as amended; IX-F effective September 1, 2025", "ssr_weekly": 460, "ppr_threshold": {"2": 832, "3": 1051, "4": 1269, "5": 1488, "6": 1706, "7": 1925, "8": 2143}, "ss_wage_base": 184500, "ss_max": 11439, "ixh_ss_cutoff_weekly": 3548, "ixh_ss_weekly_max": 220, "fica_rate": 0.0765, "medicare_rate": 0.0145, "childcare_age_limit": 13, "teen_pct": 0.146, "teen_age": 12, "par_variable": 0.37, "shared_fixed": 0.38, "shared_threshold": 0.28, "schedule_min": 180, "schedule_max": 3600, "low_award_min": 5, "health_threshold_per_child": 250, "child_care_max_1": 3000, "child_care_max_2": 6000, "nj_credit_bands": [[50000, 0.5], [75000, 0.4], [100000, 0.3], [125000, 0.2], [150000, 0.1]], "ixf": "nj_ixf_2025.csv", "ixh": "nj_ixh_2026_single.csv", "ixe": "nj_ixe_2026_federal.csv", "ixe_corrections": [[31001, "max_credit_2_plus", 2490, 2460, "IX-E 2026 p.2, $31,001-33,000, 2 or more children"]], "ixe_weekly_misprints": ["17,001-19,000: 328-265 (328-365)", "63,001-65,000: 1216-1250 (1213-1250)", "67,001-69,000: 1589-1327 (1289-1327)", "87,001-89,000: 1647-1712 (1674-1712)", "95,001-97,000: 1828-1565 (1828-1865)"]}],
@@ -970,7 +970,8 @@
         [101001, 103000, 21, 630, 1260],
         [103001, null, 20, 600, 1200],
       ],
-    }
+    },
+    ny_sets: [{"effective": "2026-03-01", "source": "CSSA Chart LDSS-4515 rev. 03/26; UD-8(2)/(3) and Temporary Maintenance Worksheet rev. 3/1/26", "ssr": 21546, "poverty": 15960, "cs_cap": 193000, "maint_cap": 241000, "cs_pct": {"1": 0.17, "2": 0.25, "3": 0.29, "4": 0.31, "5": 0.35}, "poverty_award": 300, "ssr_min_award": 600, "support_age": 21, "ss_wage_base": 184500, "ss_rate": 0.062, "medicare_rate": 0.0145, "addl_medicare_rate": 0.009, "addl_medicare_threshold": 200000, "maint_r1": [0.2, 0.25], "maint_r2": [0.3, 0.2], "maint_r3": 0.4, "duration": [[15, 0.15, 0.3], [20, 0.3, 0.4], [null, 0.35, 0.5]]}]
   };
   if (typeof module !== "undefined" && module.exports) module.exports = NJ_DATA;
   else root.NJ_DATA = NJ_DATA;

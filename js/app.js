@@ -3,7 +3,7 @@
    on this phone only (localStorage), so the last estimate is there when the app is opened again. */
 (function () {
   "use strict";
-  window.APP_VERSION = "1.0.1";
+  window.APP_VERSION = "1.2.0";
   const $ = (id) => document.getElementById(id);
   const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
   const KEY = "njest.state.v1";
@@ -26,14 +26,20 @@
     ["Household (low-income tests)", ["household_size", "other_adults_income"]],
   ];
 
-  let S;                 // the state: {scn, mode, tab, adjWho, mainWith, touched, asOfTyped, alimony}
+  let S;                 // the state: {state, scn, ny, mode, tab, adjWho, mainWith, touched, asOfTyped, alimony}
   let result = null, sheetText = "", timer = null;
 
   // ------------------------------------------------------------------------------------------------ state
   function fresh() {
-    return { scn: NJ.newScenario("Estimate"), mode: "simple", tab: "support", adjWho: "client", mainWith: "client",
-      touched: [], asOfTyped: false, alimony: { client_amount: "", client_freq: "annual", other_amount: "", other_freq: "annual" } };
+    return { state: "NJ", scn: NJ.newScenario("Estimate"), ny: freshNY(), mode: "simple", tab: "support", adjWho: "client",
+      mainWith: "client", touched: [], asOfTyped: false,
+      alimony: { client_amount: "", client_freq: "annual", other_amount: "", other_freq: "annual" } };
   }
+  // New York (1.2.0): what only New York asks. The children, the names, the earnings and the calculation date are
+  // the New Jersey estimate's, so switching state keeps them (Christopher, 2026-11-21).
+  const NY_SET = { maintenance: "post", maintenance_amount: "", maint_typed: "", maint_per: "annual", child_care_annual: "",
+    health_annual: "", health_by: "", cs_above_cap: "", marriage_date: "", commencement_date: "" };
+  function freshNY() { return { main: "client", adjWho: "client", set: Object.assign({}, NY_SET), parents: { client: {}, other: {} } }; }
   function load() {
     let s = null;
     try { s = JSON.parse(localStorage.getItem(KEY) || "null"); } catch (e) { s = null; }
@@ -41,6 +47,9 @@
     const f = fresh();
     for (const k of Object.keys(f)) if (s[k] === undefined) s[k] = f[k];
     for (const w of WHO) s.scn.parents[w] = Object.assign(NJ.newParent(DEFAULT_NAME[w]), s.scn.parents[w]);
+    if (!s.ny || !s.ny.set || !s.ny.parents) s.ny = freshNY();
+    s.ny.set = Object.assign({}, NY_SET, s.ny.set);
+    if (s.state !== "NY") s.state = "NJ";
     if (!s.asOfTyped) s.scn.as_of = NJ.isoOf(NJ.today());     // the figures in effect today, unless a date was chosen
     return s;
   }
@@ -54,6 +63,25 @@
   const round2 = (x) => Number(NJ.pyFixed(x, 2));
   const money$ = (x, d) => "$" + NJ.fmt(x, d || 0);
   const otherOf = (w) => (w === "client" ? "other" : "client");
+  const isNY = () => S.state === "NY";
+  /** A parent's gross income a year for New York, from what was typed under "What does each parent earn". */
+  function nyGross(w) {
+    const p = P(w), amt = NJ.money(p.income_amount), g = NJ.money(p.gross_taxable);
+    if (amt !== null && g !== null && Math.abs(round2(NJ.toWeekly(amt, p.income_freq || "annual")) - g) <= 0.005)
+      return round2(NJ.toAnnual(amt, p.income_freq || "annual"));
+    return g !== null ? round2(g * 52) : "";
+  }
+  /** The New York scenario (fc_nysupport's) from the shared inputs and New York's own. */
+  function nyScenario() {
+    const nm = names(), s = NY.newScenario("Estimate", S.scn.as_of), set = S.ny.set;
+    for (const k of Object.keys(NY_SET)) if (k in s) s[k] = set[k];
+    const nights = { client: { client: 365, other: 0 }, other: { client: 0, other: 365 }, equal: { client: 182, other: 182 } }[S.ny.main]
+      || { client: 365, other: 0 };
+    for (const w of WHO)
+      s.parents[w] = Object.assign(NY.newParent(nm[w]), S.ny.parents[w], { name: nm[w], gross_income: nyGross(w), overnights: nights[w] });
+    s.children = S.scn.children.map((c) => ({ name: c.name || "", dob: c.dob || "", include: c.include !== false }));
+    return s;
+  }
 
   // ------------------------------------------------------------------------------------------------ small widgets
   function seg(el, value, onPick) {
@@ -99,6 +127,7 @@
 
   // ------------------------------------------------------------------------------------------------ tabs and mode
   function showTab(tab) {
+    if (tab === "alimony" && isNY()) tab = "support";     // New York has no alimony page: maintenance is on Support
     S.tab = tab;
     for (const b of document.querySelectorAll(".tabs button")) b.classList.toggle("on", b.dataset.tab === tab);
     for (const t of ["support", "alimony", "about"]) $("tab-" + t).classList.toggle("hidden", t !== tab);
@@ -112,12 +141,29 @@
     S.mode = m;
     seg($("mode"), m, setMode);
     const full = m === "full";
-    $("fullCards").classList.toggle("hidden", !full);
+    $("fullCards").classList.toggle("hidden", !full || isNY());
+    $("nyFullCards").classList.toggle("hidden", !full || !isNY());
     $("switchBox").classList.toggle("hidden", full);
     renderKids();
-    if (full) { renderAdj(); renderSettings(); }
+    if (full && isNY()) { renderNYAdj(); renderNYSettings(); } else if (full) { renderAdj(); renderSettings(); }
     hiddenNote();
     save();
+  }
+  function setState(v) {                // New Jersey / New York: nothing typed is cleared
+    S.state = v === "NY" ? "NY" : "NJ";
+    seg($("state"), S.state, setState);
+    document.body.classList.toggle("ny", isNY());
+    document.querySelector(".tabs button[data-tab='alimony']").classList.toggle("hidden", isNY());
+    $("switchText").textContent = isNY() ? "Child care, health insurance, other income, NYC tax, or the marriage dates " +
+      "for how long maintenance lasts?" : "Alimony, child care, health insurance, other children, or taxes typed from a return?";
+    result = null;
+    if (isNY() && S.tab === "alimony") showTab("support");
+    if (isNY()) { renderNYTime(); renderNYMaint(); }
+    setMode(S.mode);
+    weekHint();
+    subTitle();
+    save();
+    calculate();
   }
   function adjustments() {             // what Full detail holds other than the usual
     let n = 0;
@@ -139,8 +185,19 @@
     if (S.asOfTyped) n++;
     return n;
   }
+  function nyAdjustments() {           // what New York's Full detail holds
+    let n = 0;
+    for (const w of WHO) for (const [k, v] of Object.entries(S.ny.parents[w])) {
+      if (k === "fica_method") { if (v === "typed") n++; continue; }
+      if (v !== "" && v !== null && v !== undefined && NJ.money(v) !== 0) n++;
+    }
+    for (const k of ["child_care_annual", "health_annual", "cs_above_cap", "marriage_date", "commencement_date"])
+      if (S.ny.set[k]) n++;
+    if (S.asOfTyped) n++;
+    return n;
+  }
   function hiddenNote() {
-    const n = S.mode === "full" ? 0 : adjustments();
+    const n = S.mode === "full" ? 0 : (isNY() ? nyAdjustments() : adjustments());
     $("hiddenNote").classList.toggle("hidden", !n);
     $("hiddenNote").textContent = n ? `Full detail holds ${n} adjustment${n !== 1 ? "s" : ""} or setting${n !== 1 ? "s" : ""} ` +
       `that ${n !== 1 ? "are" : "is"} counted in this estimate.` : "";
@@ -172,7 +229,7 @@
           <button class="linkbtn" data-swap="${i}">${byDob ? "Type an age instead" : "Birth date"}</button>
           <span style="flex:1"></span>
           <label>Counted ${switchHtml("kinc" + i, ch.include !== false)}</label>
-          ${full ? `<label>Disabled ${switchHtml("kdis" + i, !!ch.disabled)}</label>` : ""}
+          ${full && !isNY() ? `<label>Disabled ${switchHtml("kdis" + i, !!ch.disabled)}</label>` : ""}
         </div></div>`;
     }).join("") + (kids.length >= 6 ? `<button class="linkbtn" id="kidMore">+ Another child</button>` : "") +
       (kids.length === 0 ? `<div class="hint">Tap the number of children.</div>` : "");
@@ -225,9 +282,8 @@
       if (amt === null || g === null || Math.abs(round2(NJ.toWeekly(amt, per)) - g) > 0.005) {
         amt = g; per = g !== null ? "weekly" : "annual";
       }
-      return `<div class="party"><div class="lbl" data-name="${w}">${esc(nm[w].toUpperCase())}</div>
-        ${moneyField("inc_" + w, amt === null ? "" : amt)}
-        ${segHtml("per_" + w, PER, per, "small")}</div>`;
+      return `<div class="party"><div class="lbl" data-name="${w}">${esc(nm[w])}</div>
+        <div class="inrow">${moneyField("inc_" + w, amt === null ? "" : amt)}${segHtml("per_" + w, PER, per, "per")}</div></div>`;
     }).join("");
     for (const w of WHO) {
       const inp = $("inc_" + w);
@@ -249,14 +305,14 @@
     }
     weekHint();
   }
-  function weekHint() {
+  function weekHint() {                 // New Jersey works in weeks, New York in years
     const nm = names(), parts = [];
     for (const w of WHO) {
-      const g = NJ.money(P(w).gross_taxable);
+      const g = isNY() ? NJ.money(nyGross(w)) : NJ.money(P(w).gross_taxable);
       const on = $("per_" + w) && $("per_" + w).querySelector(".on");
-      if (g && on && on.dataset.v !== "weekly") parts.push(`${esc(nm[w])} ${money$(g, 2)}`);
+      if (g && on && on.dataset.v !== (isNY() ? "annual" : "weekly")) parts.push(`${esc(nm[w])} ${money$(g, isNY() ? 0 : 2)}`);
     }
-    $("weekHint").innerHTML = parts.length ? "A week: " + parts.join("&nbsp;&nbsp;·&nbsp;&nbsp;") : "";
+    $("weekHint").innerHTML = parts.length ? (isNY() ? "A year: " : "A week: ") + parts.join("&nbsp;&nbsp;·&nbsp;&nbsp;") : "";
     $("weekHint").classList.toggle("hidden", !parts.length);
   }
 
@@ -265,10 +321,10 @@
     const nm = names();
     for (const b of $("mainWith").querySelectorAll("button")) b.textContent = nm[b.dataset.v];
     seg($("mainWith"), S.mainWith, mainChanged);
-    $("presetLbl").textContent = `WITH ${nm[otherOf(S.mainWith)].toUpperCase()}`;
+    $("presetLbl").textContent = `Time with ${nm[otherOf(S.mainWith)]}`;
     $("presets").innerHTML = PRESETS.map(([t, n]) => `<button data-n="${n}"><b>${esc(t)}</b><span>${n} overnights a year</span></button>`).join("");
     for (const b of $("presets").querySelectorAll("button")) b.onclick = () => preset(Number(b.dataset.n));
-    $("nights").innerHTML = WHO.map((w) => `<div><div class="lbl" data-name="${w}">${esc(nm[w].toUpperCase())}</div>` +
+    $("nights").innerHTML = WHO.map((w) => `<div><div class="lbl" data-name="${w}">${esc(nm[w])}</div>` +
       intField("on_" + w, P(w).overnights, "nights", "") + "</div>").join("");
     for (const w of WHO) $("on_" + w).oninput = () => nightTyped(w);
     showPresets();
@@ -313,7 +369,7 @@
   function mainChanged(v) {
     const n = presetNow(true);
     S.mainWith = v;
-    $("presetLbl").textContent = `WITH ${names()[otherOf(v)].toUpperCase()}`;
+    $("presetLbl").textContent = `Time with ${names()[otherOf(v)]}`;
     if (n !== null) preset(n); else { showPresets(); save(); }
   }
 
@@ -328,6 +384,11 @@
     if (kind === "text") return `<div class="fld">${lab}<label class="field left"><input id="${id}" type="text" value="${esc(value || "")}"></label></div>`;
     return `<div class="fld">${lab}${moneyField(id, value)}</div>`;
   }
+  function entered(p, k) {             // an adjustment that differs from a new parent's
+    const v = p[k];
+    const dflt = Object.prototype.hasOwnProperty.call(PARENT_DEFAULTS, k) ? PARENT_DEFAULTS[k] : "";
+    return !(v === dflt || v === "" || v === null || v === undefined || ((v === 0 || v === false) && !(k in PARENT_DEFAULTS)));
+  }
   function renderAdj() {
     const nm = names();
     for (const b of $("adjWho").querySelectorAll("button")) b.textContent = nm[b.dataset.v];
@@ -335,15 +396,21 @@
     const p = P(S.adjWho);
     const typed = (p.tax_method || "ixh") === "typed";
     let h = "";
+    S.openGroups = S.openGroups || {};
     for (const [title, keys] of GROUPS) {
-      h += `<div class="grp">${esc(title.toUpperCase())}</div>`;
+      const n = keys.filter((k) => entered(p, k)).length;
+      const open = S.openGroups[title] !== undefined ? S.openGroups[title] : n > 0;
+      h += `<details class="grp" data-g="${esc(title)}"${open ? " open" : ""}><summary><span>${esc(title)}</span>` +
+        `<span class="cnt">${n ? n + " entered" : ""}</span></summary>`;
       for (const k of keys) {
         if (typed && (k === "eligible_dependents" || k === "self_employed")) continue;
         if (!typed && k === "tax_typed") continue;
         h += fieldHtml("a_" + k, k, p[k]);
       }
+      h += "</details>";
     }
     $("adj").innerHTML = h;
+    for (const d of $("adj").querySelectorAll("details")) d.ontoggle = () => { S.openGroups[d.dataset.g] = d.open; save(); };
     for (const [, keys] of GROUPS) for (const k of keys) {
       const el = $("a_" + k);
       if (!el) continue;
@@ -413,12 +480,253 @@
   }
   function showNames() {
     const nm = names();
-    for (const el of document.querySelectorAll("[data-name]")) el.textContent = nm[el.dataset.name].toUpperCase();
-    for (const id of ["mainWith", "adjWho"]) for (const b of $(id).querySelectorAll("button")) b.textContent = nm[b.dataset.v];
+    for (const el of document.querySelectorAll("[data-name]")) el.textContent = nm[el.dataset.name];
+    for (const id of ["mainWith", "adjWho", "nyAdjWho"]) for (const b of $(id).querySelectorAll("button")) b.textContent = nm[b.dataset.v];
+    for (const b of $("nyMain").querySelectorAll("button")) if (b.dataset.v !== "equal") b.textContent = nm[b.dataset.v];
+    const hb = $("ny_health_by");
+    if (hb) for (const b of hb.querySelectorAll("button")) if (b.dataset.v) b.textContent = nm[b.dataset.v];
     const c = $("s_custodial");
     if (c) for (const b of c.querySelectorAll("button")) if (b.dataset.v !== "auto") b.textContent = nm[b.dataset.v];
-    $("presetLbl").textContent = `WITH ${nm[otherOf(S.mainWith)].toUpperCase()}`;
+    $("presetLbl").textContent = `Time with ${nm[otherOf(S.mainWith)]}`;
     weekHint();
+  }
+
+  // ------------------------------------------------------------------------------------------------ the result
+  // ------------------------------------------------------------------------------------------------ New York (1.2.0)
+  const NY_LABEL = {}, NY_ITEM = {};
+  for (const [k, label, , item] of NY.PARENT_INPUTS) { NY_LABEL[k] = label; NY_ITEM[k] = item; }
+  const NY_GROUPS = [
+    ["Other income", NY.ADD_ITEMS.map(([k]) => k)],
+    ["Deductions", ["business_expenses", "maintenance_paid", "child_support_paid", "public_assistance", "ssi", "nyc_tax"]],
+    ["Social Security and Medicare", ["fica_method", "fica_wages", "fica_ss", "fica_medicare"]],
+  ];
+  function renderNYTime() {
+    const nm = names();
+    for (const b of $("nyMain").querySelectorAll("button")) if (b.dataset.v !== "equal") b.textContent = nm[b.dataset.v];
+    seg($("nyMain"), S.ny.main, (v) => { S.ny.main = v; changed(); });
+  }
+  function renderNYMaint() {
+    const set = S.ny.set;
+    const show = () => {
+      for (const b of $("nyMaint").querySelectorAll("button")) b.classList.toggle("on", b.dataset.v === set.maintenance);
+      $("nyMaintAmt").classList.toggle("hidden", set.maintenance !== "agreed");
+    };
+    for (const b of $("nyMaint").querySelectorAll("button")) b.onclick = () => { set.maintenance = b.dataset.v; show(); changed(); };
+    const inp = $("ny_maint_amount");
+    inp.value = set.maint_typed === "" || set.maint_typed === undefined ? "" : NJ.fmt(Number(set.maint_typed), 2);
+    const go = () => {
+      const t = inp.value.trim(), amt = t ? NJ.money(t) : null;
+      bad(inp, t && amt === null);
+      if (t && amt === null) return;
+      set.maint_typed = amt === null ? "" : amt;
+      set.maint_per = $("ny_maint_per").querySelector(".on").dataset.v;
+      set.maintenance_amount = amt === null ? "" : round2(NJ.toAnnual(amt, set.maint_per));
+      changed();
+    };
+    inp.oninput = go;
+    inp.onblur = () => { const a = NJ.money(inp.value); if (a !== null) inp.value = NJ.fmt(a, 2); };
+    seg($("ny_maint_per"), set.maint_per || "annual", go);
+    show();
+  }
+  function renderNYAdj() {
+    const nm = names(), who = S.ny.adjWho;
+    for (const b of $("nyAdjWho").querySelectorAll("button")) b.textContent = nm[b.dataset.v];
+    seg($("nyAdjWho"), who, (v) => { S.ny.adjWho = v; renderNYAdj(); save(); });
+    const p = S.ny.parents[who];
+    const typed = p.fica_method === "typed";
+    S.openGroups = S.openGroups || {};
+    let h = "";
+    for (const [title, keys] of NY_GROUPS) {
+      const n = keys.filter((k) => (k === "fica_method" ? p[k] === "typed" : p[k] !== "" && p[k] !== undefined && p[k] !== null)).length;
+      const g = "ny:" + title, open = S.openGroups[g] !== undefined ? S.openGroups[g] : n > 0;
+      h += `<details class="grp" data-g="${esc(g)}"${open ? " open" : ""}><summary><span>${esc(title)}</span>` +
+        `<span class="cnt">${n ? n + " entered" : ""}</span></summary>`;
+      for (const k of keys) {
+        if (k === "fica_method") {
+          h += `<div class="fld"><div class="lbl">How Social Security and Medicare are counted<span class="ln">items 15–16</span></div>` +
+            segHtml("ny_fica_method", [["estimate", "Worked out from wages"], ["typed", "Amounts paid"]], typed ? "typed" : "estimate", "small") + "</div>";
+          continue;
+        }
+        if (typed && k === "fica_wages") continue;
+        if (!typed && (k === "fica_ss" || k === "fica_medicare")) continue;
+        h += `<div class="fld"><div class="lbl">${esc(NY_LABEL[k])}<span class="ln">item ${esc(NY_ITEM[k])}</span></div>` +
+          moneyField("ny_" + k, p[k] === undefined ? "" : p[k]) + "</div>";
+      }
+      h += "</details>";
+    }
+    $("nyAdj").innerHTML = h;
+    for (const d of $("nyAdj").querySelectorAll("details")) d.ontoggle = () => { S.openGroups[d.dataset.g] = d.open; save(); };
+    seg($("ny_fica_method"), typed ? "typed" : "estimate", (v) => { p.fica_method = v === "typed" ? "typed" : ""; renderNYAdj(); changed(); });
+    for (const [, keys] of NY_GROUPS) for (const k of keys) {
+      const el = $("ny_" + k);
+      if (!el || k === "fica_method") continue;
+      el.oninput = () => {
+        const t = el.value.trim(), v = t ? NJ.money(t) : null;
+        bad(el, t && v === null); if (t && v === null) return;
+        if (v === null) delete p[k]; else p[k] = v;
+        changed();
+      };
+      el.onblur = () => { const a = NJ.money(el.value); if (a !== null) el.value = NJ.fmt(a, 2); };
+    }
+  }
+  function renderNYSettings() {
+    const set = S.ny.set, nm = names();
+    const dateFld = (id, label, v) => `<div class="fld"><div class="lbl">${label}</div><label class="field left"><input id="${id}" type="date" value="${esc(v || "")}"></label></div>`;
+    $("nySettings").innerHTML =
+      dateFld("ny_as_of", "Calculation date (figures in effect)", S.scn.as_of) +
+      `<div class="fld"><div class="lbl">Child care while the custodial parent works or studies (a year)</div>${moneyField("ny_child_care_annual", set.child_care_annual, { ph: "" })}</div>` +
+      `<div class="fld"><div class="lbl">Health insurance for the children (a year)</div>${moneyField("ny_health_annual", set.health_annual, { ph: "" })}</div>` +
+      `<div class="fld"><div class="lbl">Health insurance paid by</div>${segHtml("ny_health_by", [["", "Nobody"], ["client", nm.client], ["other", nm.other]], set.health_by || "", "small")}</div>` +
+      `<div class="fld"><div class="lbl">Combined income above the cap to consider (information only)</div>${moneyField("ny_cs_above_cap", set.cs_above_cap, { ph: "" })}</div>` +
+      dateFld("ny_marriage_date", "Date of the marriage (how long maintenance lasts)", set.marriage_date) +
+      dateFld("ny_commencement_date", "Date the action was commenced", set.commencement_date) +
+      `<div class="fld"><div class="lbl">Client's name on the worksheet</div><label class="field left"><input id="ny_name_client" type="text" autocomplete="off" value="${esc(P("client").name === "Client" ? "" : P("client").name)}" placeholder="Client"></label></div>` +
+      `<div class="fld"><div class="lbl">Other party's name on the worksheet</div><label class="field left"><input id="ny_name_other" type="text" autocomplete="off" value="${esc(P("other").name === "Other party" ? "" : P("other").name)}" placeholder="Other party"></label></div>`;
+    $("ny_as_of").onchange = (e) => {
+      const d = NJ.parseDate(e.target.value);
+      S.asOfTyped = !!d && e.target.value !== NJ.isoOf(NJ.today());
+      S.scn.as_of = d ? NJ.isoOf(d) : NJ.isoOf(NJ.today());
+      if (!d) e.target.value = S.scn.as_of;
+      S.scn.children.forEach((_, i) => kidAge(i));
+      subTitle(); changed();
+    };
+    for (const k of ["child_care_annual", "health_annual", "cs_above_cap"]) {
+      const el = $("ny_" + k);
+      el.oninput = () => {
+        const t = el.value.trim(), v = t ? NJ.money(t) : null;
+        bad(el, t && v === null); if (t && v === null) return;
+        set[k] = v === null ? "" : v; changed();
+      };
+      el.onblur = () => { const a = NJ.money(el.value); if (a !== null) el.value = NJ.fmt(a, 2); };
+    }
+    seg($("ny_health_by"), set.health_by || "", (v) => { set.health_by = v; changed(); });
+    for (const k of ["marriage_date", "commencement_date"])
+      $("ny_" + k).onchange = (e) => { set[k] = NJ.parseDate(e.target.value) ? e.target.value : ""; changed(); };
+    for (const w of WHO) $("ny_name_" + w).oninput = (e) => { P(w).name = e.target.value.trim() || DEFAULT_NAME[w]; showNames(); changed(); };
+  }
+  function calcNY() {
+    const nm = names();
+    let r;
+    try {
+      r = NY.compute(nyScenario());
+    } catch (e) {
+      result = null; sheetText = "";
+      headlineNY(null, e instanceof NY.CalcError ? e.message : "The calculation failed: " + e.message);
+      side([], [], []);
+      save();
+      return;
+    }
+    result = r;
+    headlineNY(r, "");
+    const kind = S.ny.set.maintenance || "post";
+    const assumed = [Object.fromEntries(NY.MAINTENANCE_KINDS)[kind] + (kind === "agreed" || kind === "none" ? "" :
+      ", worked out first; child support is on incomes adjusted for it.")];
+    if (r.duration) {
+      const [y, lo, hi] = r.duration;
+      assumed.push(`Advisory duration of post-divorce maintenance: ${NJ.pyFixed(lo, 1)} to ${NJ.pyFixed(hi, 1)} years ` +
+        `(married ${NJ.pyFixed(y, 1)} years to commencement); the court decides, using the 15 factors.`);
+    }
+    assumed.push(...r.notes);
+    assumed.push(`Figures in effect ${NJ.usDate(NJ.parseDate(r.figures.effective))} – ${r.figures.source}`);
+    side([], assumed, r.warnings);
+    sheetText = r.text(nm) + `\n\nFigures: ${r.figures.effective} – ${r.figures.source}`;
+    if (!$("sheet").classList.contains("hidden")) renderSheet();
+    save();
+  }
+  /** New York's headline: maintenance and child support, the monthly figure first, a year and a week under it. */
+  function nyRows(r) {
+    const nm = names(), rows = [];
+    const m = r.maintenance && r.maintenance.award > 0 ? r.maintenance : null;
+    const s = r.support && r.support.total > 0 ? r.support : null;
+    if (m) rows.push({ key: "maint", label: "Maintenance", who: `${nm[m.payor]} pays ${nm[m.payee]}`, year: m.award,
+      note: { temporary: "Temporary (while the case is pending)", agreed: "As agreed or ordered" }[m.kind] || "" });
+    else if (["post", "temporary"].includes(S.ny.set.maintenance)) rows.push({ key: "maint0", label: "Maintenance", who: "", note: "None from these figures", year: null });
+    if (s) {
+      rows.push({ key: "cs", label: "Child support", who: `${nm[r.ncp]} pays ${nm[r.cp]}`, year: s.total,
+        note: (r.support_after ? "On the incomes after maintenance" : "") +
+          (s.band === "ssr" ? `${r.support_after ? ". " : ""}Without the add-ons: ${money$(s.total_without_addons / 12)} a month – the court decides` : "") +
+          (s.band === "poverty" ? "Below the poverty level: $300 a year, no add-ons" : "") });
+      if (r.support_after) rows.push({ key: "after", label: "After maintenance", who: "Child support once maintenance ends", note: "", year: r.support_after.total });
+    }
+    return rows;
+  }
+  function headlineNY(r, message) {
+    const nm = names();
+    $("big").classList.add("hidden"); $("summary").classList.add("hidden"); $("nyRows").classList.remove("hidden");
+    $("answer").classList.toggle("empty", !r);
+    $("sheetBtn").disabled = $("shareBtn").disabled = !r;
+    const nothing = !S.scn.children.length && !WHO.some((w) => nyGross(w));
+    if (!r || nothing) {
+      $("answer").classList.add("empty");
+      $("sheetBtn").disabled = $("shareBtn").disabled = !r;
+      $("aBig").textContent = "No estimate yet";
+      $("aSub").textContent = !nothing ? (message || "").split(/(?<=\.) /)[0] : "Tap the number of children, or type the incomes.";
+      $("nyRows").innerHTML = `<div class="rsub">${esc(nothing ? "Tap the number of children, or type the incomes." : message || "")}</div>`;
+      updateBar();
+      return;
+    }
+    const rows = nyRows(r).filter((x) => x.year !== null);
+    const top = rows.filter((x) => x.key === "maint" || x.key === "cs");
+    if (!top.length) {
+      $("aBig").textContent = "No order";
+      $("aSub").textContent = r.summary(nm);
+    } else {
+      $("aBig").innerHTML = top.map((x) => `<span class="arow"><span>${esc(x.label)}</span><b>${money$(x.year / 12)} a month</b></span>`).join("");
+      const m = r.maintenance && r.maintenance.award > 0 ? r.maintenance : null, s = r.support && r.support.total > 0;
+      let sub;
+      if (m && s && m.payor === r.ncp) sub = `${nm[m.payor]} pays ${nm[m.payee]}  ·  ${money$((m.award + r.support.total) / 12)} a month in all`;
+      else if (m && s) sub = `Maintenance: ${nm[m.payor]} pays ${nm[m.payee]}  ·  child support: ${nm[r.ncp]} pays ${nm[r.cp]}`;
+      else sub = top[0].who;
+      $("aSub").textContent = sub;
+    }
+    $("answer").classList.toggle("two", top.length > 1);
+    // each figure: what it is and the amount a month on the first line; who pays, a year and a week under it
+    const rowHtml = (key, label, main, who, under, note) => `<div class="rrow" data-k="${key}">` +
+      `<div class="r1"><span class="k">${esc(label)}</span><span class="v">${esc(main)}</span></div>` +
+      `<div class="r2"><span>${esc(who)}</span><span>${esc(under)}</span></div>` + (note ? `<div class="r3">${esc(note)}</div>` : "") + "</div>";
+    $("nyRows").innerHTML = nyRows(r).map((x) => x.year === null ? rowHtml(x.key, x.label, "–", x.note, "", "") :
+      rowHtml(x.key, x.label, `${money$(x.year / 12)} a month`, x.who, `${money$(x.year)} a year  ·  ${money$(x.year / 52)} a week`, x.note)).join("") +
+      (r.duration ? rowHtml("duration", "How long (advisory)", `${NJ.pyFixed(r.duration[1], 1)} – ${NJ.pyFixed(r.duration[2], 1)} years`,
+        `Married ${NJ.pyFixed(r.duration[0], 1)} years to the start of the case`, "", "") : "");
+    updateBar();
+  }
+  function lineParts(label) {          // " 1  Payor's income" -> ["1", "Payor's income"]; "II.3 NCP's …" -> ["II.3", …]
+    const m = label.match(/^\s*((?:[IVX]+(?:\.\d+)?)|(?:\d+[a-z]?))\s+(.*)$/);
+    return m ? [m[1], m[2]] : ["", label.trim()];
+  }
+  function renderSheetNY() {
+    const r = result, nm = names();
+    const cell = (v) => (v === null || v === undefined ? "" : (typeof v === "number" ? NJ.fmt(v, 2) : String(v)));
+    const KEY = /^(8|17|18|19|IV|II\.5)$/;
+    const table = (heads, rows) => `<table class="ws"><thead><tr><th>Line</th><th></th>${heads.map((x) => `<th>${esc(x)}</th>`).join("")}</tr></thead><tbody>` +
+      rows.map(([ln, lab, vals]) => `<tr class="${KEY.test(ln) ? "key" : ""}"><td class="ln">${esc(ln)}</td><td class="lab">${esc(lab)}</td>` +
+        vals.map((v) => `<td>${esc(cell(v))}</td>`).join("") + "</tr>").join("") + "</tbody></table>";
+    let h = `<div class="ws-title">New York – annual figures</div><div class="ws-h">INCOME (UD-8(1))</div>`;
+    const inc = [];
+    for (const [key, lab, , item] of NY.PARENT_INPUTS) {
+      if (key.startsWith("fica_")) continue;
+      const a = r.income.client[item], b = r.income.other[item];
+      if (a || b || item === "1") inc.push([item, lab, [a, b]]);
+      if (item === "7") inc.push(["8", "Gross annual income", [r.income.client["8"], r.income.other["8"]]]);
+    }
+    for (const [item, lab] of [["15", "Social Security (FICA)"], ["16", "Medicare (FICA)"], ["17", "Total deductions"], ["18", "Net annual income"]])
+      inc.push([item, lab, [r.income.client[item], r.income.other[item]]]);
+    h += table([nm.client, nm.other], inc);
+    const sect = (title, lines) => `<div class="ws-h">${esc(title)}</div>` + table([""], lines.map(([lab, v]) => { const [ln, t] = lineParts(lab); return [ln, t, [v]]; }));
+    if (r.maintenance) {
+      h += sect("MAINTENANCE – " + r.maintenance.label.toUpperCase(), r.maintenance.lines);
+      if (r.duration) h += `<div class="ws-title" style="margin-top:6px">Advisory duration: ${NJ.pyFixed(r.duration[1], 1)} to ${NJ.pyFixed(r.duration[2], 1)} years (married ${NJ.pyFixed(r.duration[0], 1)} years to commencement).</div>`;
+    }
+    for (const [title, s] of [["CHILD SUPPORT" + (r.support_after ? " – WITH MAINTENANCE" : ""), r.support], ["CHILD SUPPORT – AFTER MAINTENANCE ENDS", r.support_after]]) {
+      if (!s) continue;
+      h += sect(title, s.lines) + `<div class="ws-title">Non-custodial parent: ${esc(nm[r.ncp])} · custodial parent: ${esc(nm[r.cp])}</div>`;
+    }
+    h += `<div class="ws-sum">${esc(r.summary(nm))}</div>`;
+    const list = (title, xs) => (xs.length ? `<div class="ws-h">${title}</div><ul class="ws-list">${xs.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : "");
+    h += list("CHECK", r.warnings) + list("NOTES", r.notes);
+    h += `<div class="ws-h">FIGURES</div><ul class="ws-list"><li>${esc(r.figures.effective)} – ${esc(r.figures.source)}</li></ul>`;
+    $("sheetTitle").textContent = "Worksheet";
+    $("sheetBody").innerHTML = h;
   }
 
   // ------------------------------------------------------------------------------------------------ the result
@@ -430,6 +738,7 @@
   function calculate() {
     syncAges();
     hiddenNote();
+    if (isNY()) { calcNY(); return; }
     const nm = names();
     let r = null;
     try {
@@ -464,10 +773,14 @@
       big = `${money$(r.order)} a week`;
       sub = `${nm[r.payer]} pays ${nm[r.payee]}  ·  about ${money$(r.order * 52 / 12)} a month  ·  ${r.worksheet} parenting worksheet`;
     }
+    $("big").classList.remove("hidden"); $("summary").classList.remove("hidden"); $("nyRows").classList.add("hidden");
+    $("answer").classList.remove("two");
     $("big").textContent = big;
     $("summary").textContent = sub;
-    $("barBig").textContent = big;
-    $("barSub").textContent = r ? sub : (message || "");
+    $("aBig").textContent = r ? big : "No estimate yet";
+    $("answer").classList.toggle("empty", !r);
+    $("aSub").textContent = r ? (r.payer && r.order > 0 ? `${nm[r.payer]} pays ${nm[r.payee]}  ·  about ${money$(r.order * 52 / 12)} a month` : sub)
+      : (S.scn.children.length ? (message || "").split(/(?<=\.) /)[0] : "Tap the number of children to start.");
     $("sheetBtn").disabled = $("shareBtn").disabled = !r;
     updateBar();
   }
@@ -478,15 +791,17 @@
     $("whatif").innerHTML = whatif.map((x) => `<p>${esc(x)}</p>`).join("");
     $("assumed").innerHTML = assumed.length ? assumed.map((x) => `<p>${esc(x)}</p>`).join("") : "Nothing yet.";
   }
-  let resultVisible = true;
-  function updateBar() {
-    const show = S.tab === "support" && !!result && !resultVisible && $("sheet").classList.contains("hidden");
-    $("bar").classList.toggle("hidden", !show);
+  function updateBar() {                 // the answer on Child support, the page's name elsewhere
+    const sup = S.tab === "support";
+    $("answer").classList.toggle("hidden", !sup);
+    $("pageTitle").classList.toggle("hidden", sup);
+    $("pageHead").classList.toggle("hidden", S.tab === "about");
   }
 
   // ------------------------------------------------------------------------------------------------ worksheet
   const KEY_LINES = { sole: ["6", "8", "13", "21", "27"], shared: ["6", "8", "12", "29", "35"] };
   function renderSheet() {
+    if (isNY()) { if (result) renderSheetNY(); return; }
     const r = result, nm = names();
     if (!r) return;
     const heads = r.cols.map(([k, h]) => h);
@@ -518,7 +833,8 @@
   }
   function shareText() {
     const d = NJ.usDate(NJ.today());
-    return `NJ child support estimate (${d}) – an estimate, not a court form\n\n${sheetText}`;
+    return (isNY() ? `NY maintenance and child support estimate (${d})` : `NJ child support estimate (${d})`) +
+      ` – an estimate, not a court form\n\n${sheetText}`;
   }
   async function share(title, text) {
     if (navigator.share) {
@@ -552,9 +868,8 @@
       const typed = NJ.money(d[w + "_amount"]);
       const per = typed !== null ? (d[w + "_freq"] || "annual") : "annual";
       const amt = typed !== null ? typed : facts[w];
-      return `<div class="party"><div class="lbl" data-name="${w}">${esc(nm[w].toUpperCase())}</div>
-        ${moneyField("al_" + w, amt === null ? "" : amt, { cls: typed === null && amt !== null ? "fact" : "" })}
-        ${segHtml("alper_" + w, PER, per, "small")}<div class="hint" id="alsrc_${w}"></div></div>`;
+      return `<div class="party"><div class="lbl" data-name="${w}">${esc(nm[w])}</div>
+        <div class="inrow">${moneyField("al_" + w, amt === null ? "" : amt, { cls: typed === null && amt !== null ? "fact" : "" })}${segHtml("alper_" + w, PER, per, "per")}</div><div class="hint" id="alsrc_${w}"></div></div>`;
     }).join("");
     for (const w of WHO) {
       const inp = $("al_" + w);
@@ -607,50 +922,52 @@
 
   // ------------------------------------------------------------------------------------------------ start
   function subTitle() {
-    const f = NJ.njFigures(S.scn.as_of);
-    $("pageSub").textContent = `New Jersey · guidelines from ${NJ.usDate(NJ.parseDate(f.effective))}`;
+    const f = isNY() ? NY.nyFigures(S.scn.as_of) : NJ.njFigures(S.scn.as_of);
+    $("pageSub").textContent = `Guidelines in effect from ${NJ.usDate(NJ.parseDate(f.effective))}`;
   }
   function renderAll() {
     seg($("mode"), S.mode, setMode);
     renderEarn();
     renderTime();
-    setMode(S.mode);
-    subTitle();
+    renderNYTime();
+    renderNYMaint();
     showTab(S.tab);
-    calculate();
+    setState(S.state);
   }
   function start() {
     for (const b of document.querySelectorAll(".tabs button")) b.onclick = () => showTab(b.dataset.tab);
     S = load();
     $("toFull").onclick = () => setMode("full");
     $("clearBtn").onclick = () => confirmBox("Start over?", "Clear the children, incomes and adjustments on this phone?",
-      "Start over", () => { const tab = S.tab; S = fresh(); S.tab = tab; save(); renderAll(); });
+      "Start over", () => { const tab = S.tab, st = S.state; S = fresh(); S.tab = tab; S.state = st; save(); renderAll(); });
     $("sheetBtn").onclick = openSheet;
-    $("shareBtn").onclick = () => share("Child support estimate", shareText());
+    $("shareBtn").onclick = () => share("Support estimate", shareText());
     $("sheetClose").onclick = () => { $("sheet").classList.add("hidden"); updateBar(); };
-    $("sheetShare").onclick = () => share("Child support estimate", shareText());
+    $("sheetShare").onclick = () => share("Support estimate", shareText());
     $("sheetCopy").onclick = () => copy(shareText());
     $("sheetPrint").onclick = () => printText(shareText());
-    $("bar").onclick = () => $("result").scrollIntoView({ behavior: "smooth", block: "start" });
+    $("answer").onclick = () => $("result").scrollIntoView({ behavior: "smooth", block: "start" });
+    seg($("state"), S.state, setState);
     $("alFrom").onclick = () => {
       for (const w of WHO) { S.alimony[w + "_amount"] = ""; S.alimony[w + "_freq"] = "annual"; }
       save(); renderAlimony();
     };
     $("alShare").onclick = () => share("Alimony estimate", `NJ alimony estimate (${NJ.usDate(NJ.today())})\n\n${alText()}`);
     const f = NJ.njFigures();
+    const fy = NY.nyFigures();
     $("aboutText").innerHTML = `<p>Support Calculator: a quick estimate of New Jersey child support (Rules Appendix IX: the sole and shared ` +
-      `parenting worksheets, IX-E child care, IX-H withholding, the IX-F schedule) and a rule-of-thumb alimony figure – ` +
-      `the same calculation as the Family Cases app on the office computers.</p>` +
-      `<p>Figures in effect from ${esc(NJ.usDate(NJ.parseDate(f.effective)))}: ${esc(f.source)}.</p>` +
+      `parenting worksheets, IX-E child care, IX-H withholding, the IX-F schedule) and a rule-of-thumb alimony figure; and of ` +
+      `New York maintenance and child support (the Annual Income Worksheet, post-divorce or temporary guideline maintenance, ` +
+      `and the Child Support Standards Act on the incomes after maintenance) – the same calculations as the Case Management ` +
+      `app on the office computers.</p>` +
+      `<p>New Jersey figures in effect from ${esc(NJ.usDate(NJ.parseDate(f.effective)))}: ${esc(f.source)}.</p>` +
+      `<p>New York figures in effect from ${esc(NJ.usDate(NJ.parseDate(fy.effective)))}: ${esc(fy.source)}.</p>` +
       `<p>Nothing typed here leaves this phone. The last estimate is kept on this phone until <i>Start over</i>.</p>` +
       `<p>An estimate for discussion, not a court form.</p><p class="hint">Version ${esc(window.APP_VERSION || "")}</p>`;
-    if ("IntersectionObserver" in window) {
-      new IntersectionObserver((es) => { resultVisible = es[0].isIntersecting; updateBar(); }).observe($("result"));
-    }
     renderAll();
     window.SC_STARTED = true;
     if ("serviceWorker" in navigator && window.isSecureContext) navigator.serviceWorker.register("sw.js").catch(() => {});
   }
-  window.NJApp = { state: () => S, result: () => result, sheetText: () => sheetText, alText };
+  window.NJApp = { state: () => S, result: () => result, sheetText: () => sheetText, alText, nyScenario: () => nyScenario() };
   start();
 })();
