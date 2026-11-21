@@ -7,7 +7,7 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="Support Calculator">
-<meta name="theme-color" content="#F5F7FA">
+<meta name="theme-color" content="#1F3A5F">
 <meta name="format-detection" content="telephone=no">
 <title>Support Calculator</title>
 <link rel="manifest" href="manifest.webmanifest">
@@ -27,7 +27,7 @@
       d.className = "boot-error";
       d.innerHTML = "<b>" + (window.SC_STARTED ? "Something went wrong." : "The app didn't start.") + "</b>" +
         "<div class='be-msg'></div><button type='button'>Repair and reload</button>";
-      d.querySelector(".be-msg").textContent = msg + "  [version " + (window.APP_VERSION || "1.0.1") + "]";
+      d.querySelector(".be-msg").textContent = msg + "  [version " + (window.APP_VERSION || "1.2.0") + "]";
       d.querySelector("button").onclick = window.SC_REPAIR;
       document.body.appendChild(d);
     }
@@ -57,13 +57,21 @@
 </head>
 <body>
 
+<!-- the answer, always in view on Child support; the page's name on the other tabs -->
 <header class="top">
-  <div>
-    <h1 id="pageTitle">Child support</h1>
-    <div id="pageSub" class="sub"></div>
-  </div>
-  <button id="clearBtn" class="pill plain">Start over</button>
+  <h1 id="pageTitle" class="ttl">Child support</h1>
+  <button id="answer" class="answer" type="button" aria-live="polite">
+    <span id="aBig" class="a-big">–</span><span id="aSub" class="a-sub"></span>
+  </button>
 </header>
+
+<div class="staterow" id="stateRow">
+  <div class="seg state" id="state"><button data-v="NJ" class="on">New Jersey</button><button data-v="NY">New York</button></div>
+</div>
+<div class="pagehead" id="pageHead">
+  <div id="pageSub" class="sub"></div>
+  <button id="clearBtn" class="textbtn">Start over</button>
+</div>
 
 <!-- ============ child support ============ -->
 <section id="tab-support" class="page">
@@ -73,8 +81,10 @@
     <div class="ctitle">1. How many children, and how old?</div>
     <div class="chips" id="kidCount"></div>
     <div id="kids"></div>
-    <div class="hint">Type an age, or tap <i>Birth date</i>. Turn off <i>Counted</i> for a child outside the guidelines
+    <div class="hint nj-only">Type an age, or tap <i>Birth date</i>. Turn off <i>Counted</i> for a child outside the guidelines
       (18 or over and out of high school).</div>
+    <div class="hint ny-only">Type an age, or tap <i>Birth date</i>. New York child support runs to 21: turn off
+      <i>Counted</i> for a child who is emancipated.</div>
   </div>
 
   <div class="card">
@@ -83,14 +93,48 @@
     <div id="weekHint" class="hint hidden"></div>
   </div>
 
-  <div class="card">
+  <div class="card nj-only">
     <div class="ctitle">3. How much time do the children spend with each parent?</div>
-    <div class="lbl">THE CHILDREN LIVE MAINLY WITH</div>
+    <div class="lbl">The children live mainly with</div>
     <div class="seg" id="mainWith"><button data-v="client" class="on">Client</button><button data-v="other">Other party</button></div>
-    <div class="lbl mt" id="presetLbl">WITH OTHER PARTY</div>
+    <div class="lbl mt" id="presetLbl">Time with Other party</div>
     <div class="presets" id="presets"></div>
     <div class="two mt" id="nights"></div>
     <div class="hint">A button fills in both numbers. Type over either one; the two need not add up to 365.</div>
+  </div>
+
+  <!-- New York (1.2.0): who the children live with decides who is custodial; maintenance comes first -->
+  <div class="card ny-only">
+    <div class="ctitle">3. Who do the children mainly live with?</div>
+    <div class="seg" id="nyMain"><button data-v="client" class="on">Client</button><button data-v="other">Other party</button><button data-v="equal">Equal time</button></div>
+    <div class="hint">In New York the time with each parent doesn't change the amount: it decides who receives child
+      support. Equal time: the parent with the higher income pays.</div>
+  </div>
+  <div class="card ny-only">
+    <div class="ctitle">4. Maintenance</div>
+    <div class="presets" id="nyMaint">
+      <button data-v="post"><b>Guideline, after the divorce</b><span>Post-divorce worksheet</span></button>
+      <button data-v="temporary"><b>Temporary</b><span>While the case is pending</span></button>
+      <button data-v="agreed"><b>An amount agreed or ordered</b><span>Type it below</span></button>
+      <button data-v="none"><b>None</b><span>Child support only</span></button>
+    </div>
+    <div id="nyMaintAmt" class="fld hidden"><div class="lbl">Maintenance agreed or ordered</div>
+      <div class="inrow"><label class="field"><span class="unit">$</span><input id="ny_maint_amount" type="text" inputmode="decimal" autocomplete="off" placeholder="0.00"></label><div class="seg per" id="ny_maint_per"><button data-v="annual" class="on">a year</button><button data-v="monthly">a month</button></div></div></div>
+    <div class="hint">Worked out first; child support then uses the incomes after maintenance.</div>
+  </div>
+
+  <div id="nyFullCards" class="hidden">
+    <div class="card">
+      <div class="ctitle">5. Adjustments</div>
+      <div class="seg" id="nyAdjWho"><button data-v="client" class="on">Client</button><button data-v="other">Other party</button></div>
+      <div id="nyAdj"></div>
+      <div class="hint">Amounts a year, as in the Annual Income Worksheet (UD-8(1)). Federal and state income taxes are
+        not deducted in New York.</div>
+    </div>
+    <div class="card">
+      <div class="ctitle">How it is worked out</div>
+      <div id="nySettings"></div>
+    </div>
   </div>
 
   <div id="fullCards" class="hidden">
@@ -108,17 +152,18 @@
 
   <div id="hiddenNote" class="banner warn hidden"></div>
   <div id="switchBox" class="dashed">
-    <div>Alimony, child care, health insurance, other children, or taxes typed from a return?</div>
+    <div id="switchText">Alimony, child care, health insurance, other children, or taxes typed from a return?</div>
     <button id="toFull" class="btn secondary">Switch to Full detail</button>
   </div>
 
-  <div id="result" class="resultbox">
-    <div class="rcap">ESTIMATE</div>
+  <div id="result" class="card resultcard">
+    <div class="ctitle">Estimate</div>
     <div id="big" class="rbig">–</div>
     <div id="summary" class="rsub"></div>
+    <div id="nyRows" class="hidden"></div>
     <div class="rbtns">
-      <button id="sheetBtn" class="rbtn">See the worksheet</button>
-      <button id="shareBtn" class="rbtn">Share</button>
+      <button id="sheetBtn" class="btn save">See the worksheet</button>
+      <button id="shareBtn" class="btn secondary">Share</button>
     </div>
   </div>
   <div id="check" class="banner warn hidden"></div>
@@ -135,8 +180,6 @@
 
 <!-- ============ alimony ============ -->
 <section id="tab-alimony" class="page hidden">
-  <div class="banner warn">New Jersey has no formula for alimony – the court weighs the statutory factors. These are sample
-    figures by a rule of thumb, for discussion: 20%, 25% and 30% of the difference between the two gross incomes.</div>
   <div class="card">
     <div class="ctitle">Gross income of each party</div>
     <div id="alEarn"></div>
@@ -150,6 +193,8 @@
     <table class="altable" id="alTable"></table>
     <button id="alShare" class="btn secondary wide">Share</button>
   </div>
+  <div class="note">New Jersey has no formula for alimony – the court weighs the statutory factors. These are sample
+    figures by a rule of thumb, for discussion: 20%, 25% and 30% of the difference between the two gross incomes.</div>
   <div class="spacer"></div>
 </section>
 
@@ -164,13 +209,11 @@
 </section>
 
 <nav class="tabs">
-  <button data-tab="support" class="on"><span class="ic">⚖︎</span>Child support</button>
-  <button data-tab="alimony"><span class="ic">％</span>Alimony</button>
-  <button data-tab="about"><span class="ic">ⓘ</span>About</button>
+  <button data-tab="support" class="on"><span class="ic"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v17M7 20h10M5 7h14M5 7l-3 6a3 3 0 006 0zM19 7l-3 6a3 3 0 006 0z"/></svg></span>Support</button>
+  <button data-tab="alimony"><span class="ic"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 18L18 6"/><circle cx="7.5" cy="7.5" r="2.5"/><circle cx="16.5" cy="16.5" r="2.5"/></svg></span>Alimony</button>
+  <button data-tab="about"><span class="ic"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.5"/></svg></span>About</button>
 </nav>
 
-<!-- result bar (child support): stays in view while the figures are typed -->
-<button id="bar" class="bar hidden"><span id="barBig"></span><span id="barSub"></span></button>
 
 <!-- worksheet -->
 <div id="sheet" class="sheet hidden">
@@ -197,10 +240,12 @@
 
 <script src="js/tables.js" onerror="SC_FAIL('js/tables.js could not be loaded from the web site.')"></script>
 <script src="js/engine.js" onerror="SC_FAIL('js/engine.js could not be loaded from the web site.')"></script>
+<script src="js/engine-ny.js" onerror="SC_FAIL('js/engine-ny.js could not be loaded from the web site.')"></script>
 <script src="js/app.js" onerror="SC_FAIL('js/app.js could not be loaded from the web site.')"></script>
 <script>
   if (!window.NJ_DATA) SC_FAIL("js/tables.js didn't load (is the js folder on the web site?)");
   else if (!window.NJ) SC_FAIL("js/engine.js didn't load (is the js folder on the web site?)");
+  else if (!window.NY) SC_FAIL("js/engine-ny.js didn't load (is the js folder on the web site?)");
   else if (!window.NJApp) SC_FAIL("js/app.js didn't load (is the js folder on the web site?)");
 </script>
 </body>

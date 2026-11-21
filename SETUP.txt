@@ -1,6 +1,59 @@
-SUPPORT CALCULATOR FOR IPHONE  -  version 1.0.1  (November 17, 2026)
+SUPPORT CALCULATOR FOR IPHONE  -  version 1.2.0  (November 21, 2026)
 =====================================================================
 (1.0.0 was called "NJ Estimate".)
+
+1.2.0 - NEW YORK:
+  * "New Jersey | New York" at the top of the Support page. Switching keeps
+    the children, the incomes and the names, so one family can be looked at
+    under both states.
+  * New York works out maintenance first, then child support on the incomes
+    after maintenance - the same calculation as the New York quick estimate
+    in Case Management (itself checked against the court's own calculator).
+    The steps: 1 the children (counted to 21), 2 what each parent earns,
+    3 who the children mainly live with (Client / Other party / Equal time -
+    with equal time the higher income pays child support), 4 maintenance
+    (guideline after the divorce, temporary, an amount agreed or ordered -
+    a year or a month -, or none).
+  * The top band shows maintenance and child support a month; the estimate
+    card shows each a month, with a year and a week under it, child support
+    once maintenance ends, and how long maintenance lasts (advisory) when the
+    marriage and commencement dates are given.
+  * Full detail (New York): the other income items of the Annual Income
+    Worksheet, the deductions (NYC tax ...), Social Security and Medicare
+    worked out or typed as paid, child care, health insurance and who pays
+    it, income above the cap, the marriage and commencement dates.
+  * The worksheet shows every line (income, maintenance, child support with
+    and after maintenance); Share / Copy / Print send it as text.
+  * In a New York estimate there is no Alimony tab (maintenance is on the
+    Support page).
+  TO INSTALL: upload the changed files as before - index.html, app.css,
+  sw.js, js\app.js, js\engine-ny.js (new), js\tables.js, tests\, tools\,
+  SETUP.txt, HOW-IT-WORKS.md (or simply everything).
+  TO UNDO: upload the 1.1.0 files again (and delete js/engine-ny.js from the
+  repository); what was typed on the phones is kept.
+
+1.1.0 - THE NEW LOOK (from the design review; the figures are unchanged):
+  * The estimate is always at the top of the Support page, in the navy band,
+    and changes as you type - also while the keyboard is open. Tap it to go
+    to the estimate card (worksheet, Share). The bar at the bottom is gone.
+  * Each parent's earnings on one line, with "a year / a month / a week"
+    beside the amount.
+  * Labels in light capitals; anything chosen is navy (Simple / Full detail
+    too); grey text a little darker, easier to read; the box being typed in
+    is outlined.
+  * Full detail: the adjustments are in groups (Income, Taxes, Other
+    children, Benefits, Child care and health, Household) that open with a
+    tap; a closed group says how many are entered; one with something in it
+    opens by itself.
+  * The estimate card is white, with "See the worksheet" as the main button.
+  * Alimony: the caution about the rule of thumb is under the figures.
+  * The first tab is "Support"; its icons are drawn.
+  TO INSTALL: upload the changed files to the repository as before (index.html,
+  app.css, sw.js, js\app.js, tests\e2e.py, SETUP.txt, HOW-IT-WORKS.md - or
+  simply all of them). The phones take it the next time the app is opened
+  online (close it and open it again if it still looks as before).
+  TO UNDO: upload the 1.0.1 files again (the previous zip); nothing on the
+  phones needs to change - what was typed is kept either way.
 
 WHAT IT IS
   A web app that is added to the iPhone home screen (teal icon with scales and
@@ -72,16 +125,25 @@ IF IT DOESN'T START
 
 EVERYDAY USE
 ------------
-  Child support (Simple)
+  New Jersey / New York
+    At the top of the Support page. The children, incomes and names stay
+    when you switch.
+  Support (Simple), New Jersey
     1 Tap the number of children, then type each age (or tap "Birth date").
     2 Type what each parent earns before tax, and pick a year / a month / a week.
     3 Tap who the children live with mainly, then an arrangement (e.g. "Every
       other weekend" = 100 overnights), or type the overnights.
-    The estimate shows at once - also in the bar at the bottom while you type -
-    with "What would change it" and what was "Assumed".
+    The estimate shows at once at the top, and stays there while you type;
+    the card under the questions has the worksheet, Share, "What would
+    change it" and what was "Assumed".
+  Support (Simple), New York
+    1 and 2 as for New Jersey; 3 who the children mainly live with; 4 the kind
+    of maintenance. The estimate: maintenance and child support a month (a
+    year and a week under each), and child support once maintenance ends.
   Full detail
-    The adjustments for either parent (alimony, taxes typed from a return,
-    other children, benefits, child care, health insurance, household), the
+    New Jersey: the adjustments for either parent in groups that open with a tap (alimony,
+    taxes typed from a return, other children, benefits, child care, health
+    insurance, household), the
     worksheet and custodial parent, parenting plan, the initial order date
     (teenage adjustment), a deviation, and the names to show on the worksheet.
     Back in Simple, a yellow note says when Full detail still holds something
@@ -97,12 +159,14 @@ EVERYDAY USE
 
 UPDATES
 -------
-  When the guidelines change (the yearly check in May finds a new Notice to
-  the Bar), Family Cases is updated first. Then, on a computer:
+  When the guidelines change (New Jersey: the yearly check in May finds a new
+  Notice to the Bar; New York: the figures change every March 1), Case
+  Management is updated first. Then, on a computer:
     1. python tools\make_tables.py  <path to the family folder>
          (rewrites js\tables.js from Family Cases' figures and tables)
     2. python tests\parity.py  <path to the family folder>
-         (must say "0 differ")
+       python tests\parity_ny.py  <path to the family folder>
+         (each must say "0 differ")
     3. Raise VERSION in sw.js (e.g. nj-estimate-1.0.2) and the version in
        js\app.js, then upload the changed files to the repository
        ("Add file" -> "Upload files"; drag a folder to keep it, e.g. js).
