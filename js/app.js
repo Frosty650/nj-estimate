@@ -1,973 +1,1278 @@
-/* NJ Estimate - the screens. The calculation is js/engine.js (the same as Family Cases' quick estimate); this file
-   only collects the inputs, shows the result and shares the worksheet. Nothing leaves the phone: what is typed is kept
-   on this phone only (localStorage), so the last estimate is there when the app is opened again. */
+/* Activity Entry for iPhone - screens and syncing. Data rules live in core.js, Dropbox calls in dropbox.js. */
 (function () {
   "use strict";
-  window.APP_VERSION = "1.2.0";
+  const C = window.AECore, D = window.AEDropbox, LS = D.LS, N = window.AENames;
+  const CFG = Object.assign({ dropboxAppKey: "" }, window.AE_CONFIG || {});
+  const LOCK_AFTER_MS = 15 * 60 * 1000;
+  const SYNC_EVERY_MS = 60 * 1000;
   const $ = (id) => document.getElementById(id);
-  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
-  const KEY = "njest.state.v1";
-  const WHO = ["client", "other"];
-  const DEFAULT_NAME = { client: "Client", other: "Other party" };
-  const PRESETS = [["Little or none", 0], ["Every other weekend", 100], ["Two nights a week", 104], ["Equal time", 182]];
-  const PER = [["annual", "a year"], ["monthly", "a month"], ["weekly", "a week"]];
-  const PARENT_DEFAULTS = { tax_method: "ixh", nj_resident: true, eligible_dependents: 0, self_employed: false };
-  const SIMPLE_KEYS = ["gross_taxable", "overnights"];
-  const LABEL = {}; const LINE = {}; const KIND = {};
-  for (const [k, label, kind, line] of NJ.PARENT_INPUTS) { LABEL[k] = label; LINE[k] = line; KIND[k] = kind; }
-  const GROUPS = [
-    ["Income", ["mand_retirement", "alimony_paid_deductible", "alimony_recv_taxable", "nontaxable", "nontaxable_source",
-      "alimony_paid_nondeductible", "alimony_recv_nontaxable"]],
-    ["Taxes", ["tax_method", "tax_typed", "eligible_dependents", "self_employed", "union_dues"]],
-    ["Children of another relationship", ["other_orders", "other_dep_deduction"]],
-    ["Government benefits for the child", ["gov_benefits_child", "gov_benefits_credit"]],
-    ["Child care and health", ["child_care_annual", "agi_annual", "nj_resident", "health_premium_child",
-      "unreimbursed_over250", "extraordinary"]],
-    ["Household (low-income tests)", ["household_size", "other_adults_income"]],
-  ];
+  const esc = (s) => String(s === null || s === undefined ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const money = (v) => "$" + Number(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-  let S;                 // the state: {state, scn, ny, mode, tab, adjWho, mainWith, touched, asOfTyped, alimony}
-  let result = null, sheetText = "", timer = null;
+  // ================================================================== local storage (IndexedDB for the big things)
+  const idb = {
+    db: null,
+    open() {
+      if (this.db) return Promise.resolve(this.db);
+      return new Promise((res, rej) => {
+        const r = indexedDB.open("activity-entry", 1);
+        r.onupgradeneeded = () => r.result.createObjectStore("kv");
+        r.onsuccess = () => { this.db = r.result; res(this.db); };
+        r.onerror = () => rej(r.error);
+      });
+    },
+    async tx(mode, fn) {
+      const db = await this.open();
+      return new Promise((res, rej) => {
+        const t = db.transaction("kv", mode); const st = t.objectStore("kv"); const out = fn(st);
+        t.oncomplete = () => res(out && "result" in out ? out.result : undefined);
+        t.onerror = () => rej(t.error);
+      });
+    },
+    get(k) { return this.tx("readonly", (s) => s.get(k)); },
+    set(k, v) { return this.tx("readwrite", (s) => s.put(v, k)); },
+    del(k) { return this.tx("readwrite", (s) => s.delete(k)); },
+    keys() { return this.tx("readonly", (s) => s.getAllKeys()); },
+  };
 
-  // ------------------------------------------------------------------------------------------------ state
-  function fresh() {
-    return { state: "NJ", scn: NJ.newScenario("Estimate"), ny: freshNY(), mode: "simple", tab: "support", adjWho: "client",
-      mainWith: "client", touched: [], asOfTyped: false,
-      alimony: { client_amount: "", client_freq: "annual", other_amount: "", other_freq: "annual" } };
-  }
-  // New York (1.2.0): what only New York asks. The children, the names, the earnings and the calculation date are
-  // the New Jersey estimate's, so switching state keeps them (Christopher, 2026-11-21).
-  const NY_SET = { maintenance: "post", maintenance_amount: "", maint_typed: "", maint_per: "annual", child_care_annual: "",
-    health_annual: "", health_by: "", cs_above_cap: "", marriage_date: "", commencement_date: "" };
-  function freshNY() { return { main: "client", adjWho: "client", set: Object.assign({}, NY_SET), parents: { client: {}, other: {} } }; }
-  function load() {
-    let s = null;
-    try { s = JSON.parse(localStorage.getItem(KEY) || "null"); } catch (e) { s = null; }
-    if (!s || !s.scn || !s.scn.parents) s = fresh();
-    const f = fresh();
-    for (const k of Object.keys(f)) if (s[k] === undefined) s[k] = f[k];
-    for (const w of WHO) s.scn.parents[w] = Object.assign(NJ.newParent(DEFAULT_NAME[w]), s.scn.parents[w]);
-    if (!s.ny || !s.ny.set || !s.ny.parents) s.ny = freshNY();
-    s.ny.set = Object.assign({}, NY_SET, s.ny.set);
-    if (s.state !== "NY") s.state = "NJ";
-    if (!s.asOfTyped) s.scn.as_of = NJ.isoOf(NJ.today());     // the figures in effect today, unless a date was chosen
-    return s;
-  }
-  function save() { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { /* private mode: not kept */ } }
-  const P = (w) => S.scn.parents[w];
-  function names() {
-    const o = {};
-    for (const w of WHO) o[w] = (P(w).name || "").trim() || DEFAULT_NAME[w];
-    return o;
-  }
-  const round2 = (x) => Number(NJ.pyFixed(x, 2));
-  const money$ = (x, d) => "$" + NJ.fmt(x, d || 0);
-  const otherOf = (w) => (w === "client" ? "other" : "client");
-  const isNY = () => S.state === "NY";
-  /** A parent's gross income a year for New York, from what was typed under "What does each parent earn". */
-  function nyGross(w) {
-    const p = P(w), amt = NJ.money(p.income_amount), g = NJ.money(p.gross_taxable);
-    if (amt !== null && g !== null && Math.abs(round2(NJ.toWeekly(amt, p.income_freq || "annual")) - g) <= 0.005)
-      return round2(NJ.toAnnual(amt, p.income_freq || "annual"));
-    return g !== null ? round2(g * 52) : "";
-  }
-  /** The New York scenario (fc_nysupport's) from the shared inputs and New York's own. */
-  function nyScenario() {
-    const nm = names(), s = NY.newScenario("Estimate", S.scn.as_of), set = S.ny.set;
-    for (const k of Object.keys(NY_SET)) if (k in s) s[k] = set[k];
-    const nights = { client: { client: 365, other: 0 }, other: { client: 0, other: 365 }, equal: { client: 182, other: 182 } }[S.ny.main]
-      || { client: 365, other: 0 };
-    for (const w of WHO)
-      s.parents[w] = Object.assign(NY.newParent(nm[w]), S.ny.parents[w], { name: nm[w], gross_income: nyGross(w), overnights: nights[w] });
-    s.children = S.scn.children.map((c) => ({ name: c.name || "", dob: c.dob || "", include: c.include !== false }));
-    return s;
-  }
+  // ================================================================== state
+  const S = {
+    settings: LS.get("settings") || {},       // phoneName, folder, lock, credId, appKey
+    own: null,                                 // this phone's file (entries + deleted)
+    ownLists: null,                            // this phone's Lists file (new clients / matters)
+    files: {},                                 // other computers' files: name -> {rev, kind, parsed}
+    model: null,
+    editing: null,
+    syncing: false, syncAgain: false,
+    lastError: LS.get("syncError") || "",
+  };
+  const saveSettings = () => LS.set("settings", S.settings);
+  const unsynced = () => new Set(LS.get("unsynced") || []);
+  const setUnsynced = (s) => LS.set("unsynced", [...s]);
+  const last = () => Object.assign({ client: "", matter: {}, case: {} }, LS.get("last") || {});
 
-  // ------------------------------------------------------------------------------------------------ small widgets
-  function seg(el, value, onPick) {
-    for (const b of el.querySelectorAll("button")) {
-      b.classList.toggle("on", b.dataset.v === String(value));
-      b.onclick = () => { for (const x of el.querySelectorAll("button")) x.classList.toggle("on", x === b); onPick(b.dataset.v); };
+  const folder = () => S.settings.folder;
+  const ownFileName = () => `${C.DATA_PREFIX}${C.safeName(S.settings.phoneName)}.json`;
+  const ownListsName = () => `Lists - ${C.safeName(S.settings.phoneName)}.json`;
+  const ownPath = () => `${folder()}/Data/${ownFileName()}`;
+  const ownListsPath = () => `${folder()}/Lists/${ownListsName()}`;
+  const emptyLists = () => ({ clients: {}, matters: [], activities: [] });
+
+  // ================================================================== the combined picture
+  function buildModel() {
+    const listsFiles = [];
+    const dataFiles = [];
+    for (const [name, f] of Object.entries(S.files)) {
+      if (f.kind === "lists") listsFiles.push({ name, data: f.parsed });
+      else if (f.kind === "clientlist") continue;
+      else if (f.parsed) dataFiles.push(Object.assign({ name }, f.parsed));
     }
+    listsFiles.push({ name: ownListsName(), data: S.ownLists || emptyLists() });
+    const ownRes = C.readPhoneData(ownFileName(), S.own || C.emptyOwn(S.settings.phoneName));
+    dataFiles.push(Object.assign({ name: ownFileName() }, ownRes));
+    const changes = new C.ListChanges(listsFiles);
+    const merged = C.mergeAll(dataFiles, changes);
+    const lists = C.loadLists(listsFiles, merged.entries, changes);
+    const all = C.allNames(listsFiles, merged.entries, changes);
+    const caseIdx = C.caseIndex(merged.entries, C.caseRecords(listsFiles, changes));
+    const clf = S.files[C.CLIENT_LIST_NAME];                       // Client Intake's client list (1.1.0)
+    const cl = clf && clf.kind === "clientlist" ? C.parseClientList(clf.parsed) : null;
+    const ids = C.clientIds(listsFiles, changes, cl);
+    const nots = new Set(cl ? [...cl.notClients].map((n) => changes.canon("client", n)) : []);
+    const extra = C.intakeExtra(lists.clients, ids, cl);
+    S.model = { changes, entries: merged.entries, issues: merged.issues, lists, all, caseIdx, cl, ids, nots, extra,
+      defaultActivity: C.defaultActivity(changes, lists.activities) };
+    return S.model;
   }
-  function segHtml(id, opts, value, cls) {
-    return `<div class="seg ${cls || ""}" id="${id}">` + opts.map(([v, t]) =>
-      `<button data-v="${esc(v)}" class="${String(v) === String(value) ? "on" : ""}">${esc(t)}</button>`).join("") + "</div>";
-  }
-  function moneyField(id, value, opts) {
-    opts = opts || {};
-    const v = value === "" || value === null || value === undefined ? "" : (typeof value === "number" ? NJ.fmt(value, 2) : value);
-    return `<label class="field${opts.cls ? " " + opts.cls : ""}"><span class="unit">$</span><input id="${id}" type="text" ` +
-      `inputmode="decimal" autocomplete="off" placeholder="${opts.ph !== undefined ? opts.ph : "0.00"}" value="${esc(v)}"></label>`;
-  }
-  function intField(id, value, unit, ph) {
-    return `<label class="field"><input id="${id}" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" ` +
-      `placeholder="${ph || "0"}" value="${esc(value === "" || value === null || value === undefined ? "" : value)}">` +
-      (unit ? `<span class="unit after">${unit}</span>` : "") + "</label>";
-  }
-  function switchHtml(id, on) {
-    return `<label class="switch"><input id="${id}" type="checkbox"${on ? " checked" : ""}><span></span></label>`;
-  }
-  function toast(msg) {
-    const t = $("toast");
-    t.textContent = msg;
-    t.classList.remove("hidden");
-    clearTimeout(toast.t);
-    toast.t = setTimeout(() => t.classList.add("hidden"), 2200);
-  }
-  function confirmBox(title, body, okText, fn) {
-    $("dialogTitle").textContent = title;
-    $("dialogBody").textContent = body;
-    $("dialogBtns").innerHTML = `<button id="dlgNo">Cancel</button><button id="dlgOk" class="danger">${esc(okText)}</button>`;
-    $("dialog").classList.remove("hidden");
-    $("dlgNo").onclick = () => $("dialog").classList.add("hidden");
-    $("dlgOk").onclick = () => { $("dialog").classList.add("hidden"); fn(); };
-  }
-  function bad(input, isBad) { input.closest(".field").classList.toggle("bad", !!isBad); }
 
-  // ------------------------------------------------------------------------------------------------ tabs and mode
-  function showTab(tab) {
-    if (tab === "alimony" && isNY()) tab = "support";     // New York has no alimony page: maintenance is on Support
-    S.tab = tab;
-    for (const b of document.querySelectorAll(".tabs button")) b.classList.toggle("on", b.dataset.tab === tab);
-    for (const t of ["support", "alimony", "about"]) $("tab-" + t).classList.toggle("hidden", t !== tab);
-    $("pageTitle").textContent = { support: "Child support", alimony: "Alimony", about: "About" }[tab];
-    if (tab === "alimony") renderAlimony();
-    updateBar();
-    window.scrollTo(0, 0);
-    save();
+  // ================================================================== Dropbox sync
+  async function loadLocal() {
+    S.own = (await idb.get("own")) || C.emptyOwn(S.settings.phoneName);
+    S.ownLists = (await idb.get("ownLists")) || emptyLists();
+    S.files = (await idb.get("files")) || {};
   }
-  function setMode(m) {
-    S.mode = m;
-    seg($("mode"), m, setMode);
-    const full = m === "full";
-    $("fullCards").classList.toggle("hidden", !full || isNY());
-    $("nyFullCards").classList.toggle("hidden", !full || !isNY());
-    $("switchBox").classList.toggle("hidden", full);
-    renderKids();
-    if (full && isNY()) { renderNYAdj(); renderNYSettings(); } else if (full) { renderAdj(); renderSettings(); }
-    hiddenNote();
-    save();
-  }
-  function setState(v) {                // New Jersey / New York: nothing typed is cleared
-    S.state = v === "NY" ? "NY" : "NJ";
-    seg($("state"), S.state, setState);
-    document.body.classList.toggle("ny", isNY());
-    document.querySelector(".tabs button[data-tab='alimony']").classList.toggle("hidden", isNY());
-    $("switchText").textContent = isNY() ? "Child care, health insurance, other income, NYC tax, or the marriage dates " +
-      "for how long maintenance lasts?" : "Alimony, child care, health insurance, other children, or taxes typed from a return?";
-    result = null;
-    if (isNY() && S.tab === "alimony") showTab("support");
-    if (isNY()) { renderNYTime(); renderNYMaint(); }
-    setMode(S.mode);
-    weekHint();
-    subTitle();
-    save();
-    calculate();
-  }
-  function adjustments() {             // what Full detail holds other than the usual
-    let n = 0;
-    for (const w of WHO) {
-      const p = P(w);
-      for (const [k] of NJ.PARENT_INPUTS) {
-        if (SIMPLE_KEYS.includes(k)) continue;
-        const v = p[k];
-        const dflt = Object.prototype.hasOwnProperty.call(PARENT_DEFAULTS, k) ? PARENT_DEFAULTS[k] : "";
-        if (v === dflt || v === "" || v === null || v === undefined) continue;
-        if ((v === 0 || v === false) && !Object.prototype.hasOwnProperty.call(PARENT_DEFAULTS, k)) continue;
-        n++;
+  async function saveOwn() { S.own.updated = C.isoNow(); await idb.set("own", S.own); }
+  async function saveOwnLists() { await idb.set("ownLists", S.ownLists); LS.set("ownListsDirty", true); }
+
+  function parseFile(kind, name, buffer) {
+    if (kind === "lists" || kind === "clientlist") {
+      try { return JSON.parse(new TextDecoder().decode(buffer)); } catch (e) { return {}; }
+    }
+    if (kind === "phone") {
+      let data = null;
+      try { data = JSON.parse(new TextDecoder().decode(buffer)); } catch (e) { /* unreadable */ }
+      return C.readPhoneData(name, data);
+    }
+    try {
+      const wb = XLSX.read(new Uint8Array(buffer), { type: "array", cellDates: false, cellFormula: false, cellHTML: false });
+      const sheets = {};
+      for (const sn of wb.SheetNames) {
+        if (sn !== "Entries" && sn !== "Corrections" && sn !== wb.SheetNames[0]) continue;
+        sheets[sn] = XLSX.utils.sheet_to_json(wb.Sheets[sn], { header: 1, raw: true, defval: null, blankrows: true });
       }
-    }
-    const base = NJ.newScenario();
-    for (const k of ["worksheet", "custodial", "parenting_plan", "separate_accommodations", "initial_order_date", "deviation_amount"])
-      if (S.scn[k] !== undefined && S.scn[k] !== base[k]) n++;
-    n += (S.scn.children || []).filter((c) => c.disabled).length;
-    if (S.asOfTyped) n++;
-    return n;
-  }
-  function nyAdjustments() {           // what New York's Full detail holds
-    let n = 0;
-    for (const w of WHO) for (const [k, v] of Object.entries(S.ny.parents[w])) {
-      if (k === "fica_method") { if (v === "typed") n++; continue; }
-      if (v !== "" && v !== null && v !== undefined && NJ.money(v) !== 0) n++;
-    }
-    for (const k of ["child_care_annual", "health_annual", "cs_above_cap", "marriage_date", "commencement_date"])
-      if (S.ny.set[k]) n++;
-    if (S.asOfTyped) n++;
-    return n;
-  }
-  function hiddenNote() {
-    const n = S.mode === "full" ? 0 : (isNY() ? nyAdjustments() : adjustments());
-    $("hiddenNote").classList.toggle("hidden", !n);
-    $("hiddenNote").textContent = n ? `Full detail holds ${n} adjustment${n !== 1 ? "s" : ""} or setting${n !== 1 ? "s" : ""} ` +
-      `that ${n !== 1 ? "are" : "is"} counted in this estimate.` : "";
-  }
-
-  // ------------------------------------------------------------------------------------------------ 1 children
-  function syncAges() {
-    for (const ch of S.scn.children) {
-      if (ch.by !== "dob" && ch.age_entered !== "" && ch.age_entered !== undefined && ch.age_entered !== null)
-        ch.dob = NJ.dobFromAge(Number(ch.age_entered), S.scn.as_of);
-      else if (ch.by !== "dob") ch.dob = "";
-    }
-  }
-  function renderKids() {
-    const kids = S.scn.children;
-    $("kidCount").innerHTML = [1, 2, 3, 4, 5, 6].map((n) =>
-      `<button data-n="${n}" class="${kids.length === n ? "on" : ""}">${n}</button>`).join("");
-    for (const b of $("kidCount").querySelectorAll("button")) b.onclick = () => setKidCount(Number(b.dataset.n));
-    const full = S.mode === "full";
-    $("kids").innerHTML = kids.map((ch, i) => {
-      const byDob = ch.by === "dob";
-      const input = byDob
-        ? `<label class="field left"><input id="kdob${i}" type="date" value="${esc(ch.dob || "")}"></label>`
-        : intField(`kage${i}`, ch.age_entered, "years old", "Age");
-      return `<div class="kid">
-        <div class="kid-head"><b>Child ${i + 1}</b><button class="kid-x" data-i="${i}" aria-label="Remove">✕</button></div>
-        <div class="kid-row">${input}<span class="kid-age" id="kshow${i}"></span></div>
-        <div class="kid-opts">
-          <button class="linkbtn" data-swap="${i}">${byDob ? "Type an age instead" : "Birth date"}</button>
-          <span style="flex:1"></span>
-          <label>Counted ${switchHtml("kinc" + i, ch.include !== false)}</label>
-          ${full && !isNY() ? `<label>Disabled ${switchHtml("kdis" + i, !!ch.disabled)}</label>` : ""}
-        </div></div>`;
-    }).join("") + (kids.length >= 6 ? `<button class="linkbtn" id="kidMore">+ Another child</button>` : "") +
-      (kids.length === 0 ? `<div class="hint">Tap the number of children.</div>` : "");
-    kids.forEach((ch, i) => {
-      const age = $("kage" + i), dob = $("kdob" + i);
-      if (age) age.oninput = () => {
-        const t = age.value.trim();
-        const ok = !t || (/^\d+$/.test(t) && Number(t) <= 30);
-        bad(age, !ok);
-        if (!ok) return;
-        ch.age_entered = t ? Number(t) : "";
-        changed();
-      };
-      if (dob) dob.onchange = () => { ch.dob = NJ.parseDate(dob.value) ? dob.value : ""; kidAge(i); changed(); };
-      $("kinc" + i).onchange = (e) => { ch.include = e.target.checked; changed(); };
-      if ($("kdis" + i)) $("kdis" + i).onchange = (e) => { ch.disabled = e.target.checked; changed(); };
-      kidAge(i);
-    });
-    for (const b of $("kids").querySelectorAll(".kid-x")) b.onclick = () => { kids.splice(Number(b.dataset.i), 1); renderKids(); changed(); };
-    for (const b of $("kids").querySelectorAll("[data-swap]")) b.onclick = () => {
-      const ch = kids[Number(b.dataset.swap)];
-      if (ch.by === "dob") { ch.by = "age"; ch.dob = ""; } else { ch.by = "dob"; ch.age_entered = ""; ch.dob = ""; }
-      renderKids(); changed();
-    };
-    if ($("kidMore")) $("kidMore").onclick = () => setKidCount(kids.length + 1);
-  }
-  function kidAge(i) {
-    const ch = S.scn.children[i], el = $("kshow" + i);
-    if (!el) return;
-    const a = ch.by === "dob" && ch.dob ? NJ.ageOn(ch.dob, S.scn.as_of) : null;
-    el.textContent = a !== null && a >= 0 ? `age ${a}` : "";
-  }
-  function setKidCount(n) {
-    const kids = S.scn.children;
-    while (kids.length < n) kids.push({ name: "", dob: "", age_entered: "", by: "age", include: true, disabled: false });
-    if (kids.length > n) kids.length = n;
-    renderKids();
-    changed();
-    const first = kids.findIndex((c) => c.by !== "dob" && (c.age_entered === "" || c.age_entered === undefined));
-    if (first >= 0 && $("kage" + first)) $("kage" + first).focus();
-  }
-
-  // ------------------------------------------------------------------------------------------------ 2 earnings
-  function renderEarn() {
-    const nm = names();
-    $("earn").innerHTML = WHO.map((w) => {
-      const p = P(w);
-      let amt = NJ.money(p.income_amount), per = p.income_freq || "annual";
-      const g = NJ.money(p.gross_taxable);
-      if (amt === null || g === null || Math.abs(round2(NJ.toWeekly(amt, per)) - g) > 0.005) {
-        amt = g; per = g !== null ? "weekly" : "annual";
-      }
-      return `<div class="party"><div class="lbl" data-name="${w}">${esc(nm[w])}</div>
-        <div class="inrow">${moneyField("inc_" + w, amt === null ? "" : amt)}${segHtml("per_" + w, PER, per, "per")}</div></div>`;
-    }).join("");
-    for (const w of WHO) {
-      const inp = $("inc_" + w);
-      const go = () => {
-        const t = inp.value.trim();
-        const amt = t ? NJ.money(t) : null;
-        bad(inp, t && amt === null);
-        if (t && amt === null) return;
-        const per = $("per_" + w).querySelector(".on").dataset.v;
-        const p = P(w);
-        if (amt === null) { p.gross_taxable = ""; delete p.income_amount; delete p.income_freq; }
-        else { p.income_amount = amt; p.income_freq = per; p.gross_taxable = round2(NJ.toWeekly(amt, per)); }
-        weekHint();
-        changed();
-      };
-      inp.oninput = go;
-      inp.onblur = () => { const a = NJ.money(inp.value); if (a !== null) inp.value = NJ.fmt(a, 2); };
-      seg($("per_" + w), $("per_" + w).querySelector(".on").dataset.v, go);
-    }
-    weekHint();
-  }
-  function weekHint() {                 // New Jersey works in weeks, New York in years
-    const nm = names(), parts = [];
-    for (const w of WHO) {
-      const g = isNY() ? NJ.money(nyGross(w)) : NJ.money(P(w).gross_taxable);
-      const on = $("per_" + w) && $("per_" + w).querySelector(".on");
-      if (g && on && on.dataset.v !== (isNY() ? "annual" : "weekly")) parts.push(`${esc(nm[w])} ${money$(g, isNY() ? 0 : 2)}`);
-    }
-    $("weekHint").innerHTML = parts.length ? (isNY() ? "A year: " : "A week: ") + parts.join("&nbsp;&nbsp;·&nbsp;&nbsp;") : "";
-    $("weekHint").classList.toggle("hidden", !parts.length);
-  }
-
-  // ------------------------------------------------------------------------------------------------ 3 parenting time
-  function renderTime() {
-    const nm = names();
-    for (const b of $("mainWith").querySelectorAll("button")) b.textContent = nm[b.dataset.v];
-    seg($("mainWith"), S.mainWith, mainChanged);
-    $("presetLbl").textContent = `Time with ${nm[otherOf(S.mainWith)]}`;
-    $("presets").innerHTML = PRESETS.map(([t, n]) => `<button data-n="${n}"><b>${esc(t)}</b><span>${n} overnights a year</span></button>`).join("");
-    for (const b of $("presets").querySelectorAll("button")) b.onclick = () => preset(Number(b.dataset.n));
-    $("nights").innerHTML = WHO.map((w) => `<div><div class="lbl" data-name="${w}">${esc(nm[w])}</div>` +
-      intField("on_" + w, P(w).overnights, "nights", "") + "</div>").join("");
-    for (const w of WHO) $("on_" + w).oninput = () => nightTyped(w);
-    showPresets();
-  }
-  function setNights(w, v, show) {
-    P(w).overnights = v;
-    if (show !== false) $("on_" + w).value = v === "" || v === null ? "" : String(v);
-  }
-  function preset(n) {
-    const main = S.mainWith, oth = otherOf(main);
-    setNights(main, 365 - n);
-    setNights(oth, n);
-    S.touched = [];
-    showPresets();
-    changed();
-  }
-  function nightTyped(w) {
-    const inp = $("on_" + w);
-    const t = inp.value.trim();
-    const ok = !t || (/^\d+$/.test(t) && Number(t) <= 366);
-    bad(inp, !ok);
-    if (!ok) return;
-    setNights(w, t ? Number(t) : "", false);
-    if (!S.touched.includes(w)) S.touched.push(w);
-    const oth = otherOf(w);
-    if (!S.touched.includes(oth)) setNights(oth, t ? Math.max(0, 365 - Number(t)) : "");   // follows until typed in
-    showPresets();
-    changed();
-  }
-  function presetNow(swapped) {
-    let main = S.mainWith, oth = otherOf(main);
-    if (swapped) [main, oth] = [oth, main];
-    const a = P(main).overnights, b = P(oth).overnights;
-    if (a === "" || a === null || a === undefined || b === "" || b === null || b === undefined) return null;
-    const x = Math.trunc(NJ.m0(a)), y = Math.trunc(NJ.m0(b));
-    return x + y === 365 && PRESETS.some(([, n]) => n === y) ? y : null;
-  }
-  function showPresets() {
-    const now = presetNow();
-    for (const b of $("presets").querySelectorAll("button")) b.classList.toggle("on", Number(b.dataset.n) === now);
-  }
-  function mainChanged(v) {
-    const n = presetNow(true);
-    S.mainWith = v;
-    $("presetLbl").textContent = `Time with ${names()[otherOf(v)]}`;
-    if (n !== null) preset(n); else { showPresets(); save(); }
-  }
-
-  // ------------------------------------------------------------------------------------------------ 4 adjustments
-  function fieldHtml(id, key, value) {
-    const kind = KIND[key];
-    const lab = `<div class="lbl">${esc(LABEL[key])}<span class="ln">line ${esc(LINE[key])}</span></div>`;
-    if (kind === "check") return `<div class="toggle-row fld"><span class="small">${esc(LABEL[key])} <span class="ln hint">line ${esc(LINE[key])}</span></span>${switchHtml(id, !!value)}</div>`;
-    if (kind === "choice") return `<div class="fld">${lab}${segHtml(id, [["ixh", "IX-H tables"], ["typed", "Typed from returns / YTD"]], value || "ixh", "small")}</div>`;
-    if (kind === "int") return `<div class="fld">${lab}${intField(id, value, "", key === "household_size" ? "" : "0")}` +
-      (key === "household_size" ? `<div class="hint">Blank: this parent and the children (${1 + (S.scn.children || []).filter((c) => c.include !== false).length}).</div>` : "") + "</div>";
-    if (kind === "text") return `<div class="fld">${lab}<label class="field left"><input id="${id}" type="text" value="${esc(value || "")}"></label></div>`;
-    return `<div class="fld">${lab}${moneyField(id, value)}</div>`;
-  }
-  function entered(p, k) {             // an adjustment that differs from a new parent's
-    const v = p[k];
-    const dflt = Object.prototype.hasOwnProperty.call(PARENT_DEFAULTS, k) ? PARENT_DEFAULTS[k] : "";
-    return !(v === dflt || v === "" || v === null || v === undefined || ((v === 0 || v === false) && !(k in PARENT_DEFAULTS)));
-  }
-  function renderAdj() {
-    const nm = names();
-    for (const b of $("adjWho").querySelectorAll("button")) b.textContent = nm[b.dataset.v];
-    seg($("adjWho"), S.adjWho, (v) => { S.adjWho = v; renderAdj(); save(); });
-    const p = P(S.adjWho);
-    const typed = (p.tax_method || "ixh") === "typed";
-    let h = "";
-    S.openGroups = S.openGroups || {};
-    for (const [title, keys] of GROUPS) {
-      const n = keys.filter((k) => entered(p, k)).length;
-      const open = S.openGroups[title] !== undefined ? S.openGroups[title] : n > 0;
-      h += `<details class="grp" data-g="${esc(title)}"${open ? " open" : ""}><summary><span>${esc(title)}</span>` +
-        `<span class="cnt">${n ? n + " entered" : ""}</span></summary>`;
-      for (const k of keys) {
-        if (typed && (k === "eligible_dependents" || k === "self_employed")) continue;
-        if (!typed && k === "tax_typed") continue;
-        h += fieldHtml("a_" + k, k, p[k]);
-      }
-      h += "</details>";
-    }
-    $("adj").innerHTML = h;
-    for (const d of $("adj").querySelectorAll("details")) d.ontoggle = () => { S.openGroups[d.dataset.g] = d.open; save(); };
-    for (const [, keys] of GROUPS) for (const k of keys) {
-      const el = $("a_" + k);
-      if (!el) continue;
-      const kind = KIND[k];
-      if (kind === "check") el.onchange = () => { p[k] = el.checked; changed(); };
-      else if (kind === "choice") seg(el, p[k] || "ixh", (v) => { p[k] = v; renderAdj(); changed(); });
-      else if (kind === "int") el.oninput = () => {
-        const t = el.value.trim(); const ok = !t || /^\d+$/.test(t);
-        bad(el, !ok); if (!ok) return;
-        p[k] = t ? Number(t) : (k === "eligible_dependents" ? 0 : ""); changed();
-      };
-      else if (kind === "text") el.oninput = () => { p[k] = el.value; changed(); };
-      else {
-        el.oninput = () => {
-          const t = el.value.trim(); const v = t ? NJ.money(t) : null;
-          bad(el, t && v === null); if (t && v === null) return;
-          p[k] = v === null ? "" : v; changed();
-        };
-        el.onblur = () => { const a = NJ.money(el.value); if (a !== null) el.value = NJ.fmt(a, 2); };
-      }
+      return C.readWorkbookData(name, sheets);
+    } catch (e) {
+      return { entries: [], corrs: [], issues: [`Could not read '${name}': ${e.message}`] };
     }
   }
 
-  // ------------------------------------------------------------------------------------------------ how it is worked out
-  function renderSettings() {
-    const s = S.scn, nm = names();
-    $("settings").innerHTML = `
-      <div class="fld"><div class="lbl">Calculation date (figures in effect)</div>
-        <label class="field left"><input id="s_as_of" type="date" value="${esc(s.as_of)}"></label></div>
-      <div class="fld"><div class="lbl">Worksheet</div>${segHtml("s_worksheet", [["auto", "Automatic"], ["sole", "Sole (IX-C)"], ["shared", "Shared (IX-D)"]], s.worksheet || "auto", "small")}</div>
-      <div class="fld"><div class="lbl">Custodial parent / PPR</div>${segHtml("s_custodial", [["auto", "Automatic"], ["client", nm.client], ["other", nm.other]], s.custodial || "auto", "small")}
-        <div class="hint">Automatic: the parent with more overnights.</div></div>
-      <div class="toggle-row fld"><span class="small">Parenting plan filed or ordered</span>${switchHtml("s_parenting_plan", s.parenting_plan !== false)}</div>
-      <div class="toggle-row fld"><span class="small">Separate living accommodations for the child at the PAR's home</span>${switchHtml("s_separate_accommodations", s.separate_accommodations !== false)}</div>
-      <div class="fld"><div class="lbl">Date of the initial child support order (teenage adjustment)</div>
-        <label class="field left"><input id="s_initial_order_date" type="date" value="${esc(s.initial_order_date || "")}"></label></div>
-      <div class="fld"><div class="lbl">Amount ordered, if different (weekly)</div>${moneyField("s_deviation_amount", s.deviation_amount, { ph: "" })}</div>
-      <div class="fld"><div class="lbl">Reason for the difference</div><label class="field left"><input id="s_deviation_reason" type="text" value="${esc(s.deviation_reason || "")}"></label></div>
-      <div class="fld"><div class="lbl">Client's name on the worksheet</div><label class="field left"><input id="s_name_client" type="text" autocomplete="off" value="${esc(P("client").name === "Client" ? "" : P("client").name)}" placeholder="Client"></label></div>
-      <div class="fld"><div class="lbl">Other party's name on the worksheet</div><label class="field left"><input id="s_name_other" type="text" autocomplete="off" value="${esc(P("other").name === "Other party" ? "" : P("other").name)}" placeholder="Other party"></label></div>`;
-    $("s_as_of").onchange = (e) => {
-      const d = NJ.parseDate(e.target.value);
-      S.asOfTyped = !!d && e.target.value !== NJ.isoOf(NJ.today());
-      s.as_of = d ? NJ.isoOf(d) : NJ.isoOf(NJ.today());
-      if (!d) e.target.value = s.as_of;
-      S.scn.children.forEach((_, i) => kidAge(i));
-      subTitle();
-      changed();
-    };
-    seg($("s_worksheet"), s.worksheet || "auto", (v) => { s.worksheet = v; changed(); });
-    seg($("s_custodial"), s.custodial || "auto", (v) => { s.custodial = v; changed(); });
-    $("s_parenting_plan").onchange = (e) => { s.parenting_plan = e.target.checked; changed(); };
-    $("s_separate_accommodations").onchange = (e) => { s.separate_accommodations = e.target.checked; changed(); };
-    $("s_initial_order_date").onchange = (e) => { s.initial_order_date = NJ.parseDate(e.target.value) ? e.target.value : ""; changed(); };
-    const dev = $("s_deviation_amount");
-    dev.oninput = () => {
-      const t = dev.value.trim(); const v = t ? NJ.money(t) : null;
-      bad(dev, t && v === null); if (t && v === null) return;
-      s.deviation_amount = v === null ? "" : v; changed();
-    };
-    $("s_deviation_reason").oninput = (e) => { s.deviation_reason = e.target.value; changed(); };
-    for (const w of WHO) $("s_name_" + w).oninput = (e) => {
-      P(w).name = e.target.value.trim() || DEFAULT_NAME[w];
-      showNames();
-      changed();
-    };
-  }
-  function showNames() {
-    const nm = names();
-    for (const el of document.querySelectorAll("[data-name]")) el.textContent = nm[el.dataset.name];
-    for (const id of ["mainWith", "adjWho", "nyAdjWho"]) for (const b of $(id).querySelectorAll("button")) b.textContent = nm[b.dataset.v];
-    for (const b of $("nyMain").querySelectorAll("button")) if (b.dataset.v !== "equal") b.textContent = nm[b.dataset.v];
-    const hb = $("ny_health_by");
-    if (hb) for (const b of hb.querySelectorAll("button")) if (b.dataset.v) b.textContent = nm[b.dataset.v];
-    const c = $("s_custodial");
-    if (c) for (const b of c.querySelectorAll("button")) if (b.dataset.v !== "auto") b.textContent = nm[b.dataset.v];
-    $("presetLbl").textContent = `Time with ${nm[otherOf(S.mainWith)]}`;
-    weekHint();
-  }
-
-  // ------------------------------------------------------------------------------------------------ the result
-  // ------------------------------------------------------------------------------------------------ New York (1.2.0)
-  const NY_LABEL = {}, NY_ITEM = {};
-  for (const [k, label, , item] of NY.PARENT_INPUTS) { NY_LABEL[k] = label; NY_ITEM[k] = item; }
-  const NY_GROUPS = [
-    ["Other income", NY.ADD_ITEMS.map(([k]) => k)],
-    ["Deductions", ["business_expenses", "maintenance_paid", "child_support_paid", "public_assistance", "ssi", "nyc_tax"]],
-    ["Social Security and Medicare", ["fica_method", "fica_wages", "fica_ss", "fica_medicare"]],
-  ];
-  function renderNYTime() {
-    const nm = names();
-    for (const b of $("nyMain").querySelectorAll("button")) if (b.dataset.v !== "equal") b.textContent = nm[b.dataset.v];
-    seg($("nyMain"), S.ny.main, (v) => { S.ny.main = v; changed(); });
-  }
-  function renderNYMaint() {
-    const set = S.ny.set;
-    const show = () => {
-      for (const b of $("nyMaint").querySelectorAll("button")) b.classList.toggle("on", b.dataset.v === set.maintenance);
-      $("nyMaintAmt").classList.toggle("hidden", set.maintenance !== "agreed");
-    };
-    for (const b of $("nyMaint").querySelectorAll("button")) b.onclick = () => { set.maintenance = b.dataset.v; show(); changed(); };
-    const inp = $("ny_maint_amount");
-    inp.value = set.maint_typed === "" || set.maint_typed === undefined ? "" : NJ.fmt(Number(set.maint_typed), 2);
-    const go = () => {
-      const t = inp.value.trim(), amt = t ? NJ.money(t) : null;
-      bad(inp, t && amt === null);
-      if (t && amt === null) return;
-      set.maint_typed = amt === null ? "" : amt;
-      set.maint_per = $("ny_maint_per").querySelector(".on").dataset.v;
-      set.maintenance_amount = amt === null ? "" : round2(NJ.toAnnual(amt, set.maint_per));
-      changed();
-    };
-    inp.oninput = go;
-    inp.onblur = () => { const a = NJ.money(inp.value); if (a !== null) inp.value = NJ.fmt(a, 2); };
-    seg($("ny_maint_per"), set.maint_per || "annual", go);
-    show();
-  }
-  function renderNYAdj() {
-    const nm = names(), who = S.ny.adjWho;
-    for (const b of $("nyAdjWho").querySelectorAll("button")) b.textContent = nm[b.dataset.v];
-    seg($("nyAdjWho"), who, (v) => { S.ny.adjWho = v; renderNYAdj(); save(); });
-    const p = S.ny.parents[who];
-    const typed = p.fica_method === "typed";
-    S.openGroups = S.openGroups || {};
-    let h = "";
-    for (const [title, keys] of NY_GROUPS) {
-      const n = keys.filter((k) => (k === "fica_method" ? p[k] === "typed" : p[k] !== "" && p[k] !== undefined && p[k] !== null)).length;
-      const g = "ny:" + title, open = S.openGroups[g] !== undefined ? S.openGroups[g] : n > 0;
-      h += `<details class="grp" data-g="${esc(g)}"${open ? " open" : ""}><summary><span>${esc(title)}</span>` +
-        `<span class="cnt">${n ? n + " entered" : ""}</span></summary>`;
-      for (const k of keys) {
-        if (k === "fica_method") {
-          h += `<div class="fld"><div class="lbl">How Social Security and Medicare are counted<span class="ln">items 15–16</span></div>` +
-            segHtml("ny_fica_method", [["estimate", "Worked out from wages"], ["typed", "Amounts paid"]], typed ? "typed" : "estimate", "small") + "</div>";
-          continue;
+  /** Write this phone's file (and Lists file) if they changed, combining with the copy in Dropbox first. */
+  async function pushOwn() {
+    if (LS.get("ownDirty")) {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const meta = await D.metadata(ownPath());
+        if (meta && meta.rev !== LS.get("ownRev")) {
+          const { buffer } = await D.download(ownPath());
+          let remote = null;
+          try { remote = JSON.parse(new TextDecoder().decode(buffer)); } catch (e) { /* ignore a damaged copy */ }
+          if (remote && remote.format === C.PHONE_FORMAT) S.own = C.mergeOwn(S.own, remote);
         }
-        if (typed && k === "fica_wages") continue;
-        if (!typed && (k === "fica_ss" || k === "fica_medicare")) continue;
-        h += `<div class="fld"><div class="lbl">${esc(NY_LABEL[k])}<span class="ln">item ${esc(NY_ITEM[k])}</span></div>` +
-          moneyField("ny_" + k, p[k] === undefined ? "" : p[k]) + "</div>";
+        const sent = new Set((S.own.entries || []).map((e) => e.id).concat(Object.keys(S.own.deleted || {})));
+        S.own.app_version = C.PHONE_APP_VERSION;
+        S.own.updated = C.isoNow();
+        const text = JSON.stringify(S.own, null, 1);
+        try {
+          const res = await D.upload(ownPath(), text, meta ? meta.rev : null);
+          LS.set("ownRev", res.rev);
+          await idb.set("own", S.own);
+          const u = unsynced();
+          for (const id of sent) u.delete(id);
+          setUnsynced(u);
+          LS.set("ownDirty", u.size > 0);
+          break;
+        } catch (e) {
+          if (!e.conflict || attempt === 2) throw e;      // changed meanwhile: read it again and retry
+        }
       }
-      h += "</details>";
     }
-    $("nyAdj").innerHTML = h;
-    for (const d of $("nyAdj").querySelectorAll("details")) d.ontoggle = () => { S.openGroups[d.dataset.g] = d.open; save(); };
-    seg($("ny_fica_method"), typed ? "typed" : "estimate", (v) => { p.fica_method = v === "typed" ? "typed" : ""; renderNYAdj(); changed(); });
-    for (const [, keys] of NY_GROUPS) for (const k of keys) {
-      const el = $("ny_" + k);
-      if (!el || k === "fica_method") continue;
-      el.oninput = () => {
-        const t = el.value.trim(), v = t ? NJ.money(t) : null;
-        bad(el, t && v === null); if (t && v === null) return;
-        if (v === null) delete p[k]; else p[k] = v;
-        changed();
-      };
-      el.onblur = () => { const a = NJ.money(el.value); if (a !== null) el.value = NJ.fmt(a, 2); };
+    if (LS.get("ownListsDirty")) {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const meta = await D.metadata(ownListsPath());
+        let base = {};
+        if (meta && meta.rev !== LS.get("ownListsRev")) {
+          try { base = JSON.parse(new TextDecoder().decode((await D.download(ownListsPath())).buffer)); } catch (e) { base = {}; }
+          S.ownLists = mergeLists(base, S.ownLists);
+        }
+        S.ownLists.updated = C.isoNow();
+        try {
+          const res = await D.upload(ownListsPath(), JSON.stringify(S.ownLists, null, 2), meta ? meta.rev : null);
+          LS.set("ownListsRev", res.rev);
+          await idb.set("ownLists", S.ownLists);
+          LS.set("ownListsDirty", false);
+          break;
+        } catch (e) { if (!e.conflict || attempt === 2) throw e; }
+      }
     }
-  }
-  function renderNYSettings() {
-    const set = S.ny.set, nm = names();
-    const dateFld = (id, label, v) => `<div class="fld"><div class="lbl">${label}</div><label class="field left"><input id="${id}" type="date" value="${esc(v || "")}"></label></div>`;
-    $("nySettings").innerHTML =
-      dateFld("ny_as_of", "Calculation date (figures in effect)", S.scn.as_of) +
-      `<div class="fld"><div class="lbl">Child care while the custodial parent works or studies (a year)</div>${moneyField("ny_child_care_annual", set.child_care_annual, { ph: "" })}</div>` +
-      `<div class="fld"><div class="lbl">Health insurance for the children (a year)</div>${moneyField("ny_health_annual", set.health_annual, { ph: "" })}</div>` +
-      `<div class="fld"><div class="lbl">Health insurance paid by</div>${segHtml("ny_health_by", [["", "Nobody"], ["client", nm.client], ["other", nm.other]], set.health_by || "", "small")}</div>` +
-      `<div class="fld"><div class="lbl">Combined income above the cap to consider (information only)</div>${moneyField("ny_cs_above_cap", set.cs_above_cap, { ph: "" })}</div>` +
-      dateFld("ny_marriage_date", "Date of the marriage (how long maintenance lasts)", set.marriage_date) +
-      dateFld("ny_commencement_date", "Date the action was commenced", set.commencement_date) +
-      `<div class="fld"><div class="lbl">Client's name on the worksheet</div><label class="field left"><input id="ny_name_client" type="text" autocomplete="off" value="${esc(P("client").name === "Client" ? "" : P("client").name)}" placeholder="Client"></label></div>` +
-      `<div class="fld"><div class="lbl">Other party's name on the worksheet</div><label class="field left"><input id="ny_name_other" type="text" autocomplete="off" value="${esc(P("other").name === "Other party" ? "" : P("other").name)}" placeholder="Other party"></label></div>`;
-    $("ny_as_of").onchange = (e) => {
-      const d = NJ.parseDate(e.target.value);
-      S.asOfTyped = !!d && e.target.value !== NJ.isoOf(NJ.today());
-      S.scn.as_of = d ? NJ.isoOf(d) : NJ.isoOf(NJ.today());
-      if (!d) e.target.value = S.scn.as_of;
-      S.scn.children.forEach((_, i) => kidAge(i));
-      subTitle(); changed();
-    };
-    for (const k of ["child_care_annual", "health_annual", "cs_above_cap"]) {
-      const el = $("ny_" + k);
-      el.oninput = () => {
-        const t = el.value.trim(), v = t ? NJ.money(t) : null;
-        bad(el, t && v === null); if (t && v === null) return;
-        set[k] = v === null ? "" : v; changed();
-      };
-      el.onblur = () => { const a = NJ.money(el.value); if (a !== null) el.value = NJ.fmt(a, 2); };
-    }
-    seg($("ny_health_by"), set.health_by || "", (v) => { set.health_by = v; changed(); });
-    for (const k of ["marriage_date", "commencement_date"])
-      $("ny_" + k).onchange = (e) => { set[k] = NJ.parseDate(e.target.value) ? e.target.value : ""; changed(); };
-    for (const w of WHO) $("ny_name_" + w).oninput = (e) => { P(w).name = e.target.value.trim() || DEFAULT_NAME[w]; showNames(); changed(); };
-  }
-  function calcNY() {
-    const nm = names();
-    let r;
-    try {
-      r = NY.compute(nyScenario());
-    } catch (e) {
-      result = null; sheetText = "";
-      headlineNY(null, e instanceof NY.CalcError ? e.message : "The calculation failed: " + e.message);
-      side([], [], []);
-      save();
-      return;
-    }
-    result = r;
-    headlineNY(r, "");
-    const kind = S.ny.set.maintenance || "post";
-    const assumed = [Object.fromEntries(NY.MAINTENANCE_KINDS)[kind] + (kind === "agreed" || kind === "none" ? "" :
-      ", worked out first; child support is on incomes adjusted for it.")];
-    if (r.duration) {
-      const [y, lo, hi] = r.duration;
-      assumed.push(`Advisory duration of post-divorce maintenance: ${NJ.pyFixed(lo, 1)} to ${NJ.pyFixed(hi, 1)} years ` +
-        `(married ${NJ.pyFixed(y, 1)} years to commencement); the court decides, using the 15 factors.`);
-    }
-    assumed.push(...r.notes);
-    assumed.push(`Figures in effect ${NJ.usDate(NJ.parseDate(r.figures.effective))} – ${r.figures.source}`);
-    side([], assumed, r.warnings);
-    sheetText = r.text(nm) + `\n\nFigures: ${r.figures.effective} – ${r.figures.source}`;
-    if (!$("sheet").classList.contains("hidden")) renderSheet();
-    save();
-  }
-  /** New York's headline: maintenance and child support, the monthly figure first, a year and a week under it. */
-  function nyRows(r) {
-    const nm = names(), rows = [];
-    const m = r.maintenance && r.maintenance.award > 0 ? r.maintenance : null;
-    const s = r.support && r.support.total > 0 ? r.support : null;
-    if (m) rows.push({ key: "maint", label: "Maintenance", who: `${nm[m.payor]} pays ${nm[m.payee]}`, year: m.award,
-      note: { temporary: "Temporary (while the case is pending)", agreed: "As agreed or ordered" }[m.kind] || "" });
-    else if (["post", "temporary"].includes(S.ny.set.maintenance)) rows.push({ key: "maint0", label: "Maintenance", who: "", note: "None from these figures", year: null });
-    if (s) {
-      rows.push({ key: "cs", label: "Child support", who: `${nm[r.ncp]} pays ${nm[r.cp]}`, year: s.total,
-        note: (r.support_after ? "On the incomes after maintenance" : "") +
-          (s.band === "ssr" ? `${r.support_after ? ". " : ""}Without the add-ons: ${money$(s.total_without_addons / 12)} a month – the court decides` : "") +
-          (s.band === "poverty" ? "Below the poverty level: $300 a year, no add-ons" : "") });
-      if (r.support_after) rows.push({ key: "after", label: "After maintenance", who: "Child support once maintenance ends", note: "", year: r.support_after.total });
-    }
-    return rows;
-  }
-  function headlineNY(r, message) {
-    const nm = names();
-    $("big").classList.add("hidden"); $("summary").classList.add("hidden"); $("nyRows").classList.remove("hidden");
-    $("answer").classList.toggle("empty", !r);
-    $("sheetBtn").disabled = $("shareBtn").disabled = !r;
-    const nothing = !S.scn.children.length && !WHO.some((w) => nyGross(w));
-    if (!r || nothing) {
-      $("answer").classList.add("empty");
-      $("sheetBtn").disabled = $("shareBtn").disabled = !r;
-      $("aBig").textContent = "No estimate yet";
-      $("aSub").textContent = !nothing ? (message || "").split(/(?<=\.) /)[0] : "Tap the number of children, or type the incomes.";
-      $("nyRows").innerHTML = `<div class="rsub">${esc(nothing ? "Tap the number of children, or type the incomes." : message || "")}</div>`;
-      updateBar();
-      return;
-    }
-    const rows = nyRows(r).filter((x) => x.year !== null);
-    const top = rows.filter((x) => x.key === "maint" || x.key === "cs");
-    if (!top.length) {
-      $("aBig").textContent = "No order";
-      $("aSub").textContent = r.summary(nm);
-    } else {
-      $("aBig").innerHTML = top.map((x) => `<span class="arow"><span>${esc(x.label)}</span><b>${money$(x.year / 12)} a month</b></span>`).join("");
-      const m = r.maintenance && r.maintenance.award > 0 ? r.maintenance : null, s = r.support && r.support.total > 0;
-      let sub;
-      if (m && s && m.payor === r.ncp) sub = `${nm[m.payor]} pays ${nm[m.payee]}  ·  ${money$((m.award + r.support.total) / 12)} a month in all`;
-      else if (m && s) sub = `Maintenance: ${nm[m.payor]} pays ${nm[m.payee]}  ·  child support: ${nm[r.ncp]} pays ${nm[r.cp]}`;
-      else sub = top[0].who;
-      $("aSub").textContent = sub;
-    }
-    $("answer").classList.toggle("two", top.length > 1);
-    // each figure: what it is and the amount a month on the first line; who pays, a year and a week under it
-    const rowHtml = (key, label, main, who, under, note) => `<div class="rrow" data-k="${key}">` +
-      `<div class="r1"><span class="k">${esc(label)}</span><span class="v">${esc(main)}</span></div>` +
-      `<div class="r2"><span>${esc(who)}</span><span>${esc(under)}</span></div>` + (note ? `<div class="r3">${esc(note)}</div>` : "") + "</div>";
-    $("nyRows").innerHTML = nyRows(r).map((x) => x.year === null ? rowHtml(x.key, x.label, "–", x.note, "", "") :
-      rowHtml(x.key, x.label, `${money$(x.year / 12)} a month`, x.who, `${money$(x.year)} a year  ·  ${money$(x.year / 52)} a week`, x.note)).join("") +
-      (r.duration ? rowHtml("duration", "How long (advisory)", `${NJ.pyFixed(r.duration[1], 1)} – ${NJ.pyFixed(r.duration[2], 1)} years`,
-        `Married ${NJ.pyFixed(r.duration[0], 1)} years to the start of the case`, "", "") : "");
-    updateBar();
-  }
-  function lineParts(label) {          // " 1  Payor's income" -> ["1", "Payor's income"]; "II.3 NCP's …" -> ["II.3", …]
-    const m = label.match(/^\s*((?:[IVX]+(?:\.\d+)?)|(?:\d+[a-z]?))\s+(.*)$/);
-    return m ? [m[1], m[2]] : ["", label.trim()];
-  }
-  function renderSheetNY() {
-    const r = result, nm = names();
-    const cell = (v) => (v === null || v === undefined ? "" : (typeof v === "number" ? NJ.fmt(v, 2) : String(v)));
-    const KEY = /^(8|17|18|19|IV|II\.5)$/;
-    const table = (heads, rows) => `<table class="ws"><thead><tr><th>Line</th><th></th>${heads.map((x) => `<th>${esc(x)}</th>`).join("")}</tr></thead><tbody>` +
-      rows.map(([ln, lab, vals]) => `<tr class="${KEY.test(ln) ? "key" : ""}"><td class="ln">${esc(ln)}</td><td class="lab">${esc(lab)}</td>` +
-        vals.map((v) => `<td>${esc(cell(v))}</td>`).join("") + "</tr>").join("") + "</tbody></table>";
-    let h = `<div class="ws-title">New York – annual figures</div><div class="ws-h">INCOME (UD-8(1))</div>`;
-    const inc = [];
-    for (const [key, lab, , item] of NY.PARENT_INPUTS) {
-      if (key.startsWith("fica_")) continue;
-      const a = r.income.client[item], b = r.income.other[item];
-      if (a || b || item === "1") inc.push([item, lab, [a, b]]);
-      if (item === "7") inc.push(["8", "Gross annual income", [r.income.client["8"], r.income.other["8"]]]);
-    }
-    for (const [item, lab] of [["15", "Social Security (FICA)"], ["16", "Medicare (FICA)"], ["17", "Total deductions"], ["18", "Net annual income"]])
-      inc.push([item, lab, [r.income.client[item], r.income.other[item]]]);
-    h += table([nm.client, nm.other], inc);
-    const sect = (title, lines) => `<div class="ws-h">${esc(title)}</div>` + table([""], lines.map(([lab, v]) => { const [ln, t] = lineParts(lab); return [ln, t, [v]]; }));
-    if (r.maintenance) {
-      h += sect("MAINTENANCE – " + r.maintenance.label.toUpperCase(), r.maintenance.lines);
-      if (r.duration) h += `<div class="ws-title" style="margin-top:6px">Advisory duration: ${NJ.pyFixed(r.duration[1], 1)} to ${NJ.pyFixed(r.duration[2], 1)} years (married ${NJ.pyFixed(r.duration[0], 1)} years to commencement).</div>`;
-    }
-    for (const [title, s] of [["CHILD SUPPORT" + (r.support_after ? " – WITH MAINTENANCE" : ""), r.support], ["CHILD SUPPORT – AFTER MAINTENANCE ENDS", r.support_after]]) {
-      if (!s) continue;
-      h += sect(title, s.lines) + `<div class="ws-title">Non-custodial parent: ${esc(nm[r.ncp])} · custodial parent: ${esc(nm[r.cp])}</div>`;
-    }
-    h += `<div class="ws-sum">${esc(r.summary(nm))}</div>`;
-    const list = (title, xs) => (xs.length ? `<div class="ws-h">${title}</div><ul class="ws-list">${xs.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : "");
-    h += list("CHECK", r.warnings) + list("NOTES", r.notes);
-    h += `<div class="ws-h">FIGURES</div><ul class="ws-list"><li>${esc(r.figures.effective)} – ${esc(r.figures.source)}</li></ul>`;
-    $("sheetTitle").textContent = "Worksheet";
-    $("sheetBody").innerHTML = h;
   }
 
-  // ------------------------------------------------------------------------------------------------ the result
-  function changed() {
-    save();
-    clearTimeout(timer);
-    timer = setTimeout(calculate, 120);
-  }
-  function calculate() {
-    syncAges();
-    hiddenNote();
-    if (isNY()) { calcNY(); return; }
-    const nm = names();
-    let r = null;
-    try {
-      r = NJ.compute(S.scn);
-    } catch (e) {
-      result = null; sheetText = "";
-      headline(null, e instanceof NJ.CalcError ? e.message : "The calculation failed: " + e.message);
-      side([], [], []);
-      save();
-      return;
+  function mergeLists(a, b) {
+    const out = Object.assign({}, a, b);
+    out.clients = Object.assign({}, a.clients || {});
+    for (const [n, ms] of Object.entries(b.clients || {})) {
+      const l = out.clients[n] = [...(out.clients[n] || [])];
+      for (const m of ms) if (!l.includes(m)) l.push(m);
     }
-    result = r;
-    headline(r, "");
-    const assumed = [];
-    if (WHO.every((w) => (P(w).tax_method || "ixh") === "ixh"))
-      assumed.push("Income tax taken from the court's withholding tables (Appendix IX-H).");
-    if (r.worksheet === "shared")
-      assumed.push("A parenting plan and separate accommodations for the children (needed for the shared parenting worksheet).");
-    assumed.push(...r.comments, ...r.notes);
-    assumed.push(`Figures in effect ${NJ.usDate(NJ.parseDate(r.figures.effective))} – ${r.figures.source}`);
-    side(NJ.whatIf(S.scn), assumed, r.warnings);
-    sheetText = r.text(nm) + `\n\nFigures: ${r.figures.effective} – ${r.figures.source}`;
-    if (!$("sheet").classList.contains("hidden")) renderSheet();
-    save();
-  }
-  function headline(r, message) {
-    const nm = names();
-    let big, sub;
-    if (!r) { big = "–"; sub = message; }
-    else if (!r.payer || r.order <= 0) { big = "No order"; sub = "No child support order results from these figures."; }
-    else {
-      big = `${money$(r.order)} a week`;
-      sub = `${nm[r.payer]} pays ${nm[r.payee]}  ·  about ${money$(r.order * 52 / 12)} a month  ·  ${r.worksheet} parenting worksheet`;
-    }
-    $("big").classList.remove("hidden"); $("summary").classList.remove("hidden"); $("nyRows").classList.add("hidden");
-    $("answer").classList.remove("two");
-    $("big").textContent = big;
-    $("summary").textContent = sub;
-    $("aBig").textContent = r ? big : "No estimate yet";
-    $("answer").classList.toggle("empty", !r);
-    $("aSub").textContent = r ? (r.payer && r.order > 0 ? `${nm[r.payer]} pays ${nm[r.payee]}  ·  about ${money$(r.order * 52 / 12)} a month` : sub)
-      : (S.scn.children.length ? (message || "").split(/(?<=\.) /)[0] : "Tap the number of children to start.");
-    $("sheetBtn").disabled = $("shareBtn").disabled = !r;
-    updateBar();
-  }
-  function side(whatif, assumed, warnings) {
-    $("check").classList.toggle("hidden", !warnings.length);
-    $("check").textContent = warnings.length ? "To check: " + warnings.join("  ") : "";
-    $("whatifCard").classList.toggle("hidden", !whatif.length);
-    $("whatif").innerHTML = whatif.map((x) => `<p>${esc(x)}</p>`).join("");
-    $("assumed").innerHTML = assumed.length ? assumed.map((x) => `<p>${esc(x)}</p>`).join("") : "Nothing yet.";
-  }
-  function updateBar() {                 // the answer on Child support, the page's name elsewhere
-    const sup = S.tab === "support";
-    $("answer").classList.toggle("hidden", !sup);
-    $("pageTitle").classList.toggle("hidden", sup);
-    $("pageHead").classList.toggle("hidden", S.tab === "about");
-  }
-
-  // ------------------------------------------------------------------------------------------------ worksheet
-  const KEY_LINES = { sole: ["6", "8", "13", "21", "27"], shared: ["6", "8", "12", "29", "35"] };
-  function renderSheet() {
-    if (isNY()) { if (result) renderSheetNY(); return; }
-    const r = result, nm = names();
-    if (!r) return;
-    const heads = r.cols.map(([k, h]) => h);
-    const who = Object.entries(r.roles).map(([w, role]) => `${({ CP: "Custodial", NCP: "Non-custodial", PPR: "PPR", PAR: "PAR" })[role]}: ${nm[w]}`).join("  ·  ");
-    let h = `<div class="ws-title">${esc(r.worksheet === "sole" ? "Sole parenting worksheet (IX-C)" : "Shared parenting worksheet (IX-D)")} – all amounts weekly<br>${esc(who)}</div>`;
-    h += `<table class="ws"><thead><tr><th>Line</th><th></th>${heads.map((x) => `<th>${esc(x)}</th>`).join("")}</tr></thead><tbody>`;
-    for (const [ln, label, vals] of r.lines) {
-      const ratio = label.startsWith("Each parent's share of income") || label.startsWith("Each parent's share of overnights");
-      const key = KEY_LINES[r.worksheet].includes(ln) || /order/i.test(label) && /^(2[2-7]|3[0-5])$/.test(ln);
-      h += `<tr class="${key ? "key" : ""}"><td class="ln">${esc(ln)}</td><td class="lab">${esc(label)}</td>` + r.cols.map(([k]) => {
-        const v = vals[k];
-        if (v === undefined || v === null || v === "") return "<td></td>";
-        return `<td>${esc(ratio ? NJ.fmt(v, 2, false) : (Number.isInteger(v) ? NJ.fmt(v) : NJ.fmt(v, 2)))}</td>`;
-      }).join("") + "</tr>";
-    }
-    h += "</tbody></table>";
-    h += `<div class="ws-sum">${esc(r.summary(nm))}</div>`;
-    const list = (title, xs) => (xs.length ? `<div class="ws-h">${title}</div><ul class="ws-list">${xs.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : "");
-    h += list("COMMENTS", r.comments) + list("CHECK", r.warnings) + list("NOTES", r.notes);
-    h += `<div class="ws-h">FIGURES</div><ul class="ws-list"><li>${esc(r.figures.effective)} – ${esc(r.figures.source)}</li></ul>`;
-    $("sheetBody").innerHTML = h;
-  }
-  function openSheet() {
-    if (!result) return;
-    renderSheet();
-    $("sheet").classList.remove("hidden");
-    $("sheetBody").scrollTop = 0;
-    updateBar();
-  }
-  function shareText() {
-    const d = NJ.usDate(NJ.today());
-    return (isNY() ? `NY maintenance and child support estimate (${d})` : `NJ child support estimate (${d})`) +
-      ` – an estimate, not a court form\n\n${sheetText}`;
-  }
-  async function share(title, text) {
-    if (navigator.share) {
-      try { await navigator.share({ title, text }); return; } catch (e) { if (e && e.name === "AbortError") return; }
-    }
-    copy(text);
-  }
-  async function copy(text) {
-    try { await navigator.clipboard.writeText(text); toast("Copied"); return; } catch (e) { /* fall back */ }
-    const ta = document.createElement("textarea");
-    ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
-    document.body.appendChild(ta); ta.select();
-    try { document.execCommand("copy"); toast("Copied"); } catch (e) { toast("Couldn't copy on this phone"); }
-    ta.remove();
-  }
-  function printText(text) { $("printText").textContent = text; window.print(); }
-
-  // ------------------------------------------------------------------------------------------------ alimony
-  function alFacts() {
-    const out = {};
-    for (const w of WHO) {
-      const g = NJ.money(P(w).gross_taxable);
-      out[w] = g ? round2(g * 52) : null;
-    }
+    out.matters = [...new Set([...(a.matters || []), ...(b.matters || [])])];
+    out.activities = [...new Set([...(a.activities || []), ...(b.activities || [])])];
+    out.client_ids = Object.assign({}, a.client_ids || {});
+    for (const [k, v] of Object.entries(b.client_ids || {})) if (!out.client_ids[k] || (v.at || "") >= (out.client_ids[k].at || "")) out.client_ids[k] = v;
+    out.removed = Object.assign({}, a.removed || {});
+    for (const [k, v] of Object.entries(b.removed || {})) if (!out.removed[k] || (v.at || "") > (out.removed[k].at || "")) out.removed[k] = v;
     return out;
   }
-  let alYear = {}, alResult = null;
-  function renderAlimony() {
-    const d = S.alimony, facts = alFacts(), nm = names();
-    $("alEarn").innerHTML = WHO.map((w) => {
-      const typed = NJ.money(d[w + "_amount"]);
-      const per = typed !== null ? (d[w + "_freq"] || "annual") : "annual";
-      const amt = typed !== null ? typed : facts[w];
-      return `<div class="party"><div class="lbl" data-name="${w}">${esc(nm[w])}</div>
-        <div class="inrow">${moneyField("al_" + w, amt === null ? "" : amt, { cls: typed === null && amt !== null ? "fact" : "" })}${segHtml("alper_" + w, PER, per, "per")}</div><div class="hint" id="alsrc_${w}"></div></div>`;
-    }).join("");
-    for (const w of WHO) {
-      const inp = $("al_" + w);
-      const go = () => {
-        const t = inp.value.trim(); const amt = t ? NJ.money(t) : null;
-        bad(inp, t && amt === null); if (t && amt === null) return;
-        d[w + "_amount"] = amt === null ? "" : amt;
-        d[w + "_freq"] = $("alper_" + w).querySelector(".on").dataset.v;
-        inp.closest(".field").classList.remove("fact");
-        alCalc(); save();
-      };
-      inp.oninput = go;
-      inp.onblur = () => { const a = NJ.money(inp.value); if (a !== null) inp.value = NJ.fmt(a, 2); };
-      seg($("alper_" + w), $("alper_" + w).querySelector(".on").dataset.v, go);
-    }
-    alCalc();
-  }
-  function alCalc() {
-    const d = S.alimony, facts = alFacts(), nm = names();
-    for (const w of WHO) {
-      const typed = NJ.money(d[w + "_amount"]);
-      const per = d[w + "_freq"] || "annual";
-      let src;
-      if (typed !== null) {
-        alYear[w] = NJ.toAnnual(typed, per);
-        src = "Typed here." + (per !== "annual" ? `  A year: ${money$(alYear[w])}.` : "");
-      } else {
-        alYear[w] = facts[w] || 0;
-        src = facts[w] !== null ? "From the child support estimate." : "Nothing in the child support estimate yet – type it.";
+
+  /** Read the other computers' files that changed since last time. */
+  async function pullOthers() {
+    const want = {};
+    const add = (list, dir) => {
+      for (const m of list) {
+        if (m[".tag"] !== "file") continue;
+        const n = m.name;
+        if (n.startsWith("~") || n.startsWith(".")) continue;
+        const ln = n.toLowerCase();
+        if (dir === "Data") {
+          if (ln === ownFileName().toLowerCase()) continue;
+          if (ln.endsWith(".xlsx")) want[n] = { kind: "xlsx", rev: m.rev, path: m.path_lower };
+          else if (ln.endsWith(".json")) want[n] = { kind: "phone", rev: m.rev, path: m.path_lower };
+        } else if (ln.endsWith(".json") && ln !== ownListsName().toLowerCase()) {
+          want[n] = { kind: "lists", rev: m.rev, path: m.path_lower };
+        }
       }
-      $("alsrc_" + w).textContent = src;
+    };
+    const safeList = async (p) => { try { return await D.listFolder(p); } catch (e) { if (e.notFound) return []; throw e; } };
+    let dataList;
+    try { dataList = await D.listFolder(`${folder()}/Data`); }
+    catch (e) {
+      if (e.notFound) throw new D.DropboxError(`The Activity folder (${folder()}) can't be found in Dropbox. In Settings, tap "Find the Activity folder".`, 409, "folder_missing");
+      throw e;
     }
-    const r = alResult = NJ.alimony(alYear.client, alYear.other);
-    $("alDiff").textContent = `Difference in gross income: ${money$(r.difference)} a year`;
-    $("alWho").textContent = r.payer ? `${nm[r.payer]} has the higher income and would pay ${nm[r.payee]}.`
-      : "The two incomes are the same (or not entered yet).";
-    $("alTable").innerHTML = `<tr><th>Share of the difference</th><th>A week</th><th>A month</th><th>A year</th></tr>` +
-      r.rows.map((x) => `<tr><td>${x.pct}%</td><td>${money$(x.weekly)}</td><td>${money$(x.monthly)}</td><td>${money$(x.annual)}</td></tr>`).join("");
-    $("alShare").disabled = !r.payer;
-  }
-  function alText() {
-    const r = alResult, n = names();
-    if (!r || !r.payer) return "";
-    const lines = [`Alimony, rule of thumb (not a guideline): gross income a year ${n.client} ` +
-      `${money$(alYear.client)}, ${n.other} ${money$(alYear.other)}; difference ` +
-      `${money$(r.difference)}. ${n[r.payer]} would pay ${n[r.payee]}:`];
-    for (const x of r.rows) lines.push(`  ${x.pct}%: ${money$(x.weekly)} a week, ${money$(x.monthly)} a month, ${money$(x.annual)} a year`);
-    return lines.join("\n");
+    add(dataList, "Data");
+    add(await safeList(`${folder()}/Lists`), "Lists");
+    const clMeta = await D.metadata(`${folder()}/${C.CLIENT_LIST_NAME}`);     // Client Intake's list (1.1.0)
+    if (clMeta && clMeta[".tag"] === "file") want[C.CLIENT_LIST_NAME] = { kind: "clientlist", rev: clMeta.rev, path: clMeta.path_lower };
+    let changed = false;
+    for (const n of Object.keys(S.files)) if (!want[n]) { delete S.files[n]; changed = true; }
+    for (const [n, w] of Object.entries(want)) {
+      const cur = S.files[n];
+      if (cur && cur.rev === w.rev) continue;
+      const { buffer } = await D.download(w.path);
+      S.files[n] = { kind: w.kind, rev: w.rev, parsed: parseFile(w.kind, n, buffer) };
+      changed = true;
+    }
+    if (changed) await idb.set("files", S.files);
+    return changed;
   }
 
-  // ------------------------------------------------------------------------------------------------ start
-  function subTitle() {
-    const f = isNY() ? NY.nyFigures(S.scn.as_of) : NJ.njFigures(S.scn.as_of);
-    $("pageSub").textContent = `Guidelines in effect from ${NJ.usDate(NJ.parseDate(f.effective))}`;
+  async function sync(reason) {
+    if (!D.signedIn() || !S.settings.phoneName) return;
+    if (S.syncing) { S.syncAgain = true; return; }
+    S.syncing = true;
+    renderPill();
+    try {
+      do {
+        S.syncAgain = false;
+        try { await pushOwn(); }
+        catch (e) {
+          if (e.notFound && !(await D.metadata(`${folder()}/Data`)))
+            throw new D.DropboxError(`The Activity folder (${folder()}) can't be found in Dropbox. In Settings, tap "Find the Activity folder".`, 409, "folder_missing");
+          throw e;
+        }
+        await pullOthers();
+      } while (S.syncAgain);
+      S.lastError = "";
+      LS.set("lastSync", C.isoNow());
+    } catch (e) {
+      S.lastError = e.offline ? "offline" : e.signedOut ? "signedout" : (e.message || String(e));
+      if (!e.offline) console.warn("sync", reason, e);
+    } finally {
+      LS.set("syncError", S.lastError);
+      S.syncing = false;
+      buildModel();
+      if (!S.editing) refreshPickers(false);
+      renderRecent();
+      renderPill();
+      if (!$("tab-settings").classList.contains("hidden")) renderSettings();
+    }
   }
-  function renderAll() {
-    seg($("mode"), S.mode, setMode);
-    renderEarn();
-    renderTime();
-    renderNYTime();
-    renderNYMaint();
-    showTab(S.tab);
-    setState(S.state);
+
+  // ================================================================== status pill
+  function renderPill() {
+    const p = $("syncPill");
+    const n = unsynced().size;
+    p.className = "pill";
+    if (S.lastError === "signedout") { p.classList.add("bad"); p.textContent = "Sign in needed"; }
+    else if (S.lastError === "offline" || !navigator.onLine) { p.classList.add("wait"); p.textContent = n ? `Offline · ${n} waiting` : "Offline"; }
+    else if (S.lastError) { p.classList.add("bad"); p.textContent = "⚠ Problem"; }
+    else if (S.syncing && n) { p.classList.add("wait"); p.textContent = "Sending…"; }
+    else if (n) { p.classList.add("wait"); p.textContent = `${n} waiting`; }
+    else { p.classList.add("ok"); p.textContent = S.syncing ? "Syncing…" : "✓ Synced"; }
   }
-  function start() {
-    for (const b of document.querySelectorAll(".tabs button")) b.onclick = () => showTab(b.dataset.tab);
-    S = load();
-    $("toFull").onclick = () => setMode("full");
-    $("clearBtn").onclick = () => confirmBox("Start over?", "Clear the children, incomes and adjustments on this phone?",
-      "Start over", () => { const tab = S.tab, st = S.state; S = fresh(); S.tab = tab; S.state = st; save(); renderAll(); });
-    $("sheetBtn").onclick = openSheet;
-    $("shareBtn").onclick = () => share("Support estimate", shareText());
-    $("sheetClose").onclick = () => { $("sheet").classList.add("hidden"); updateBar(); };
-    $("sheetShare").onclick = () => share("Support estimate", shareText());
-    $("sheetCopy").onclick = () => copy(shareText());
-    $("sheetPrint").onclick = () => printText(shareText());
-    $("answer").onclick = () => $("result").scrollIntoView({ behavior: "smooth", block: "start" });
-    seg($("state"), S.state, setState);
-    $("alFrom").onclick = () => {
-      for (const w of WHO) { S.alimony[w + "_amount"] = ""; S.alimony[w + "_freq"] = "annual"; }
-      save(); renderAlimony();
+  $("syncPill").onclick = () => {
+    const n = unsynced().size;
+    if (S.lastError === "signedout") return dialog("Sign in to Dropbox", "The Dropbox sign-in has expired. Entries are kept on this phone until you sign in again.",
+      [{ label: "Later" }, { label: "Sign in", primary: true, fn: () => setupSignIn("", "again") }]);
+    const lastSync = LS.get("lastSync");
+    let msg = S.lastError === "offline" ? "No connection to Dropbox right now." : S.lastError ? `Couldn't sync: ${S.lastError}` : "Everything is saved in Dropbox.";
+    if (n) msg += `\n\n${n} change${n === 1 ? " is" : "s are"} kept on this phone and will be sent automatically.`;
+    if (lastSync) msg += `\n\nLast synced ${fmtWhen(lastSync)}.`;
+    dialog("Sync", msg, [{ label: "OK" }, { label: "Sync now", primary: true, fn: () => sync("manual") }]);
+  };
+
+  // ================================================================== small UI helpers
+  let toastTimer = null;
+  function toast(text, ms = 3500) {
+    const t = $("toast");
+    t.textContent = text;
+    t.classList.remove("hidden");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => t.classList.add("hidden"), ms);
+  }
+
+  function dialog(title, body, buttons = [{ label: "OK", primary: true }], { html = false } = {}) {
+    return new Promise((resolve) => {
+      $("dialogTitle").textContent = title;
+      if (html) $("dialogBody").innerHTML = body; else $("dialogBody").textContent = body;
+      const box = $("dialogBtns");
+      box.innerHTML = "";
+      buttons.forEach((b) => {
+        const el = document.createElement("button");
+        el.textContent = b.label;
+        if (b.primary) el.className = "primary";
+        if (b.danger) el.className = "danger";
+        el.onclick = () => {
+          if (b.validate && !b.validate()) return;
+          $("dialog").classList.add("hidden");
+          if (b.fn) b.fn();
+          resolve(b.value !== undefined ? b.value : b.label);
+        };
+        box.appendChild(el);
+      });
+      $("dialog").classList.remove("hidden");
+      const inp = $("dialogBody").querySelector("input");
+      if (inp) setTimeout(() => inp.focus(), 50);
+    });
+  }
+
+  /** Bottom sheet with a list to pick from. items: {label, value, sub, sep, header, action} */
+  function picker(title, items, current, { search = false } = {}) {
+    return new Promise((resolve) => {
+      $("sheetTitle").textContent = title;
+      const inp = $("sheetSearch");
+      inp.value = "";
+      inp.classList.toggle("hidden", !search);
+      const draw = () => {
+        const q = inp.value.trim().toLowerCase();
+        const list = $("sheetList");
+        list.innerHTML = "";
+        let shown = 0;
+        for (const it of items) {
+          if (q && (it.sep || it.header)) continue;
+          if (it.sep) { list.insertAdjacentHTML("beforeend", '<div class="optsep"></div>'); continue; }
+          if (it.header) { list.insertAdjacentHTML("beforeend", `<div class="opthdr">${esc(it.header)}</div>`); continue; }
+          if (q && !it.action && !(it.search ? it.search(q) : it.label.toLowerCase().includes(q))) continue;
+          const b = document.createElement("button");
+          b.className = "opt" + (it.action ? " action" : "") + (!it.action && it.value === current ? " sel" : "");
+          const label = it.dyn ? it.dyn(inp.value.trim()) : it.label;
+          b.innerHTML = `<span>${esc(label)}${it.sub ? ` <span class="osub">${esc(it.sub)}</span>` : ""}</span>`;
+          b.onclick = () => { close(); resolve(it.action ? { action: it.action, text: inp.value.trim() } : { value: it.value }); };
+          list.appendChild(b);
+          if (!it.action) shown++;
+        }
+        if (q && !shown) list.insertAdjacentHTML("afterbegin", '<div class="opthdr">No matches</div>');
+      };
+      const close = () => { $("sheet").classList.add("hidden"); inp.oninput = null; };
+      inp.oninput = draw;
+      $("sheetClose").onclick = () => { close(); resolve(null); };
+      $("sheet").onclick = (ev) => { if (ev.target.id === "sheet") { close(); resolve(null); } };
+      draw();
+      $("sheet").classList.remove("hidden");
+      $("sheetList").scrollTop = 0;
+      const sel = $("sheetList").querySelector(".sel");
+      if (sel) sel.scrollIntoView({ block: "center" });
+    });
+  }
+
+  const fmtDay = (iso) => {
+    const d = new Date(iso.slice(0, 10) + "T12:00:00");
+    const o = { weekday: "short", month: "short", day: "numeric" };
+    if (d.getFullYear() !== new Date().getFullYear()) o.year = "numeric";
+    return d.toLocaleDateString("en-US", o);
+  };
+  const fmtUS = (iso) => `${iso.slice(5, 7)}/${iso.slice(8, 10)}/${iso.slice(0, 4)}`;
+  const fmtWhen = (iso) => {
+    const d = new Date(iso);
+    return d.toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  };
+
+  // ================================================================== entry form
+  const F = {
+    client: "", matter: "", case: "", activity: "", role: "Attorney",
+    caseOpts: [], caseShown: false,
+  };
+
+  function setPick(el, text, placeholder) {
+    el.firstElementChild.textContent = text || placeholder || "";
+    el.firstElementChild.className = text ? "" : "ph";
+  }
+
+  function setClient(name, keepMatter) {
+    F.client = name;
+    setPick($("fClient"), name, "Choose client");
+    const m = S.model;
+    const { linked, others } = C.mattersFor(m.lists, name);
+    let choice = "";
+    if (keepMatter && (linked.includes(keepMatter) || others.includes(keepMatter))) choice = keepMatter;
+    else {
+      const lm = last().matter;
+      let lastM = null;
+      for (const [k, v] of Object.entries(lm)) if (m.changes.canon("client", k) === name) lastM = m.changes.canon("matter", v);
+      if (lastM && (linked.includes(lastM) || others.includes(lastM))) choice = lastM;
+      else if (linked.length) choice = linked[0];
+    }
+    setMatter(choice);
+  }
+
+  function setMatter(name, keepCase) {
+    F.matter = name;
+    setPick($("fMatter"), name, "Choose matter");
+    refreshCase(keepCase);
+    markChanges();
+  }
+
+  function refreshCase(keep) {
+    const m = S.model;
+    const cases = C.casesFor(m.caseIdx, F.client, F.matter);
+    let opts = cases.filter(([, i]) => !i.closed);
+    const ed = S.editing;
+    if (ed && ed.client === F.client && ed.matter === F.matter) {
+      const ek = ed.case || "";
+      if (!opts.some(([k]) => k === ek)) {
+        const info = (cases.find(([k]) => k === ek) || [ek, { label: ek || "1" }])[1];
+        opts.push([ek, Object.assign({}, info, { label: `${info.label} (closed)` })]);
+        opts.sort((a, b) => C.caseSort(a[0]) - C.caseSort(b[0]));
+      }
+    }
+    F.caseOpts = opts;
+    const keys = opts.map(([k]) => k);
+    if (keep === undefined && F.caseShown) keep = F.case;
+    if (keep === undefined || !keys.includes(keep)) {
+      const lc = last().case[`${F.client}||${F.matter}`];
+      keep = keys.includes(lc) ? lc : (opts.length ? opts[opts.length - 1][0] : "");
+    }
+    F.case = keep;
+    F.caseShown = opts.length >= 2;
+    $("caseWrap").classList.toggle("hidden", !F.caseShown);
+    const info = opts.find(([k]) => k === keep);
+    setPick($("fCase"), info ? info[1].label : "", "");
+  }
+
+  function currentCase() {
+    if (F.caseShown) return F.case || "";
+    if (F.caseOpts.length) return F.caseOpts[F.caseOpts.length - 1][0];
+    const all = C.casesFor(S.model.caseIdx, F.client, F.matter);
+    return all[all.length - 1][0];
+  }
+
+  function setActivity(a) { F.activity = a; setPick($("fActivity"), a, "Choose activity"); markChanges(); }
+  function setRole(r) {
+    F.role = r;
+    for (const b of $("fRole").children) b.classList.toggle("on", b.dataset.v === r);
+    markChanges();
+  }
+  function setMinutes(total) {
+    $("fHours").value = total >= 60 ? Math.floor(total / 60) : (total ? 0 : "");
+    $("fMins").value = total ? total % 60 : "";
+    markChanges();
+  }
+  const minutesValue = () => (parseInt($("fHours").value || "0", 10) || 0) * 60 + (parseInt($("fMins").value || "0", 10) || 0);
+
+  function feeChanged() {
+    const fee = C.parseMoney($("fFee").value).value;
+    const has = !!fee;
+    $("fCovered").disabled = has;
+    if (has) $("fCovered").checked = false;
+    $("coveredText").parentElement.classList.toggle("disabled", has);
+    $("coveredHint").textContent = has ? "Time on an entry with a fixed fee is recorded, but not billed by the hour."
+      : "Recorded, but not billed by the hour.";
+  }
+
+  function refreshPickers(resetActivity) {
+    if (!S.model) return;
+    if (F.client && !(F.client in S.model.lists.clients) && !(S.editing && S.editing.client === F.client)) {
+      const cur = S.model.changes.canon("client", F.client);
+      F.client = cur in S.model.lists.clients ? cur : F.client;
+      setPick($("fClient"), F.client, "Choose client");
+    }
+    if (resetActivity || !F.activity) setActivity(S.model.defaultActivity);
+    refreshCase(F.case);
+    updateTodayBtn();
+  }
+
+  function resetForm(keepClient) {
+    const m = S.model;
+    if (!keepClient) {
+      $("fDate").value = C.isoDate();
+      let lc = m.changes.canon("client", last().client);
+      if (lc && m.changes.isRemoved("client", lc)) lc = "";
+      setClient(lc || "");
+    }
+    setRole("Attorney");
+    setActivity(m.defaultActivity);
+    setMinutes(0);
+    $("fDesc").value = "";
+    $("fCost").value = "";
+    $("fFee").value = "";
+    $("fCovered").checked = false;
+    feeChanged();
+    refreshCase();
+    updateTodayBtn();
+    markChanges();
+  }
+
+  function updateTodayBtn() { $("todayBtn").classList.toggle("hidden", $("fDate").value === C.isoDate()); }
+
+  // ---- pickers
+  /** A client used here that Client Intake has no record for yet (shown with a warning sign). */
+  const unlinked = (name) => { const m = S.model; return !!(m && m.cl) && !m.ids[name] && !m.nots.has(name); };
+
+  $("fClient").onclick = async () => {
+    const m = S.model;
+    const names = [...Object.keys(m.lists.clients), ...Object.keys(m.extra)].sort(N.compare);
+    const items = names.map((n) => {
+      const id = m.extra[n] ? m.extra[n].id : m.ids[n];
+      const rec = id && m.cl ? m.cl.byId[id] : null;
+      const others = (rec && rec.other_names) || [];
+      return { label: n, value: n, sub: id || (unlinked(n) ? "⚠ not in Client Intake" : ""),
+        search: (q) => N.searchMatches(q, n) || n.toLowerCase().includes(q) || others.some((o) => N.searchMatches(q, o)) };
+    });
+    items.push({ label: "+ New client…", action: "new",
+      dyn: (q) => (q ? `+ ${m.cl ? "Not in Client Intake yet" : "New client"}: ${C.standardName(q)}` : "+ New client…") });
+    const r = await picker("Client", items, F.client, { search: true });
+    if (!r) return;
+    if (r.action === "new") return newClient(r.text);
+    setClient(r.value);
+  };
+  $("fMatter").onclick = async () => {
+    const { linked, others } = C.mattersFor(S.model.lists, F.client);
+    const items = linked.map((v) => ({ label: v, value: v }));
+    if (linked.length && others.length) items.push({ sep: true });
+    others.forEach((v) => items.push({ label: v, value: v }));
+    if (S.editing && S.editing.matter && !linked.includes(S.editing.matter) && !others.includes(S.editing.matter))
+      items.push({ label: S.editing.matter, value: S.editing.matter });
+    items.push({ label: "+ New matter type…", action: "new" });
+    const r = await picker("Matter", items, F.matter);
+    if (!r) return;
+    if (r.action === "new") return newMatter();
+    setMatter(r.value);
+  };
+  $("fCase").onclick = async () => {
+    const r = await picker("Case", F.caseOpts.map(([k, i]) => ({ label: i.label, value: k })), F.case);
+    if (r) { F.case = r.value; refreshCase(r.value); markChanges(); }
+  };
+  $("fActivity").onclick = async () => {
+    const acts = [...S.model.lists.activities];
+    if (S.editing && S.editing.activity && !acts.includes(S.editing.activity)) acts.push(S.editing.activity);
+    const r = await picker("Activity", acts.map((a) => ({ label: a, value: a })), F.activity);
+    if (r) setActivity(r.value);
+  };
+  for (const b of $("fRole").children) b.onclick = () => setRole(b.dataset.v);
+  for (const b of document.querySelectorAll(".chips button")) {
+    b.onclick = () => {
+      const mm = +b.dataset.m;
+      if (mm >= 60) $("fHours").value = mm / 60; else { $("fMins").value = mm; if (!$("fHours").value) $("fHours").value = 0; }
+      markChanges();
     };
-    $("alShare").onclick = () => share("Alimony estimate", `NJ alimony estimate (${NJ.usDate(NJ.today())})\n\n${alText()}`);
-    const f = NJ.njFigures();
-    const fy = NY.nyFigures();
-    $("aboutText").innerHTML = `<p>Support Calculator: a quick estimate of New Jersey child support (Rules Appendix IX: the sole and shared ` +
-      `parenting worksheets, IX-E child care, IX-H withholding, the IX-F schedule) and a rule-of-thumb alimony figure; and of ` +
-      `New York maintenance and child support (the Annual Income Worksheet, post-divorce or temporary guideline maintenance, ` +
-      `and the Child Support Standards Act on the incomes after maintenance) – the same calculations as the Case Management ` +
-      `app on the office computers.</p>` +
-      `<p>New Jersey figures in effect from ${esc(NJ.usDate(NJ.parseDate(f.effective)))}: ${esc(f.source)}.</p>` +
-      `<p>New York figures in effect from ${esc(NJ.usDate(NJ.parseDate(fy.effective)))}: ${esc(fy.source)}.</p>` +
-      `<p>Nothing typed here leaves this phone. The last estimate is kept on this phone until <i>Start over</i>.</p>` +
-      `<p>An estimate for discussion, not a court form.</p><p class="hint">Version ${esc(window.APP_VERSION || "")}</p>`;
-    renderAll();
-    window.SC_STARTED = true;
-    if ("serviceWorker" in navigator && window.isSecureContext) navigator.serviceWorker.register("sw.js").catch(() => {});
   }
-  window.NJApp = { state: () => S, result: () => result, sheetText: () => sheetText, alText, nyScenario: () => nyScenario() };
-  start();
+  $("todayBtn").onclick = () => { $("fDate").value = C.isoDate(); updateTodayBtn(); markChanges(); };
+  $("fDate").onchange = () => { if (!$("fDate").value) $("fDate").value = C.isoDate(); updateTodayBtn(); markChanges(); };
+  for (const id of ["fHours", "fMins"]) {
+    $(id).onfocus = (ev) => setTimeout(() => ev.target.select(), 0);
+    $(id).oninput = markChanges;
+  }
+  for (const id of ["fDesc", "fCost", "fFee"]) $(id).oninput = () => { if (id === "fFee") feeChanged(); markChanges(); };
+  $("fCovered").onchange = markChanges;
+
+  // ---- new client / matter type
+  /** The client to use for a typed name: [name, Client ID to keep or null, kind] - kind "known", "intake",
+      "removed" or "new". Any name order finds a client ("dong hyun kim" -> "Kim, Dong Hyun"). Same as Windows. */
+  function resolveClient(text) {
+    const m = S.model, ch = m.changes;
+    text = text.split(/\s+/).filter(Boolean).join(" ");
+    text = ch.canon("client", text) || text;
+    const find = (pool, t) => pool.find((c) => c.toLowerCase() === t.toLowerCase());
+    const known = Object.keys(m.lists.clients), extra = Object.keys(m.extra);
+    const removed = Object.keys(m.all.clients).filter((c) => ch.isRemoved("client", c));
+    const other = C.looksLikePerson(text) ? N.readings(text)[1] : null;
+    for (const t of [...new Set([text, C.standardName(text), other ? N.standard(other) : null].filter(Boolean))]) {
+      let hit = find(known, t); if (hit) return [hit, null, "known"];
+      hit = find(extra, t); if (hit) return [hit, m.extra[hit].id, "intake"];
+      hit = find(removed, t); if (hit) return [hit, null, "removed"];
+    }
+    return [text, null, "new"];
+  }
+
+  function nameHint(text) {
+    const t = String(text || "").split(/\s+/).filter(Boolean).join(" ");
+    if (!t) return "";
+    const [name, id, kind] = resolveClient(t);
+    const m = S.model;
+    if (kind !== "new") return `${name !== t ? "→ " + esc(name) + " · " : ""}${id || m.ids[name] ? "Client Intake " + esc(id || m.ids[name]) : kind === "removed" ? "removed from the list" : "already a client"}`;
+    if (!C.looksLikePerson(t)) return "New client – kept as typed";
+    const [first, other] = N.readings(t);
+    let h = `Family name <b>${esc(first.family)}</b>${first.given ? `, given names <b>${esc(first.given)}</b>` : ""}`;
+    if (other && N.looksFamilyFirst(t)) h += `<br><span class="warn">Family name first? Type a comma after it.</span>`;
+    if (m.cl) h += `<br><span class="warn">⚠ Not in Client Intake yet – billing needs a client record there.</span>`;
+    return h;
+  }
+
+  async function newClient(prefill) {
+    const m = S.model;
+    const opts = m.lists.matters.map((x) => `<option>${esc(x)}</option>`).join("");
+    let name = "", matter = "";
+    const pending = dialog("New client", `<label>CLIENT NAME</label><input id="ncName" class="field" value="${esc(prefill || "")}" autocapitalize="words" autocomplete="off">` +
+      `<div id="ncHint" class="hint"></div><label>MATTER</label><select id="ncMatter" class="field">${opts}</select>`,
+      [{ label: "Cancel" }, { label: "Add", primary: true, value: "add",
+        validate: () => {
+          name = $("ncName").value.split(/\s+/).filter(Boolean).join(" ");
+          matter = $("ncMatter").value;
+          return !!name;
+        } }], { html: true });
+    const upd = () => { $("ncHint").innerHTML = nameHint($("ncName").value); };
+    $("ncName").oninput = upd;
+    upd();
+    const r = await pending;
+    if (r !== "add") return;
+    const ch = m.changes;
+    let [use, cid, kind] = resolveClient(name);
+    if (kind === "removed") {
+      const r2 = await dialog("Removed client", `'${use}' was removed from the client list. Put it back?`, [{ label: "No" }, { label: "Put back", primary: true }]);
+      if (r2 !== "Put back") return;
+      S.ownLists.removed = S.ownLists.removed || {};
+      S.ownLists.removed[`client||${use}`] = { removed: false, at: C.isoNow(), by: S.settings.phoneName };
+    } else if (kind === "new") {
+      const std = C.standardName(use);
+      const other = C.looksLikePerson(use) ? N.readings(use)[1] : null;
+      const ff = other && N.looksFamilyFirst(use) && N.standard(other) !== std;
+      if (std !== use || ff) {                     // offer the firm's form of the name
+        const btns = [{ label: std, primary: true, value: std }];
+        if (ff) btns.push({ label: N.standard(other), value: N.standard(other) });
+        if (use !== std) btns.push({ label: "As typed", value: use });
+        const pick = await dialog("Client name", `How should '${use}' be stored? The firm writes names family name first, with a comma.` +
+          (m.cl ? "\n\nIt is marked 'not in Client Intake yet' until it is linked there." : ""), btns);
+        use = pick;
+      }
+    }
+    if (ch.canon("client", use) !== use) use = ch.canon("client", use);
+    const l = S.ownLists.clients[use] = S.ownLists.clients[use] || [];
+    if (matter && !l.includes(matter)) l.push(matter);
+    if (cid) {
+      S.ownLists.client_ids = S.ownLists.client_ids || {};
+      S.ownLists.client_ids[use] = { id: cid, at: C.isoNow(), by: S.settings.phoneName };
+    }
+    await saveOwnLists();
+    buildModel();
+    setClient(use, matter);
+    toast(`Added client ${use} (${matter}).`);
+    sync("lists");
+  }
+
+  async function newMatter() {
+    let text = "";
+    const r = await dialog("New matter type", '<label>MATTER TYPE (e.g. Criminal)</label><input id="nmName" class="field" autocapitalize="words" autocomplete="off">',
+      [{ label: "Cancel" }, { label: "Add", primary: true, value: "add", validate: () => { text = $("nmName").value.split(/\s+/).filter(Boolean).join(" "); return !!text; } }],
+      { html: true });
+    if (r !== "add") return;
+    const m = S.model;
+    text = m.changes.canon("matter", text);
+    const known = m.all.matters.find((x) => x.toLowerCase() === text.toLowerCase());
+    if (known && m.changes.isRemoved("matter", known)) {
+      const r2 = await dialog("Removed matter type", `'${known}' was removed from the list. Put it back?`, [{ label: "No" }, { label: "Put back", primary: true }]);
+      if (r2 !== "Put back") return;
+      S.ownLists.removed = S.ownLists.removed || {};
+      S.ownLists.removed[`matter||${known}`] = { removed: false, at: C.isoNow(), by: S.settings.phoneName };
+    } else if (!known) {
+      S.ownLists.matters.push(text);
+    }
+    await saveOwnLists();
+    buildModel();
+    setMatter(known || text);
+    sync("lists");
+  }
+
+  // ---- change hints while editing
+  function formValues() {
+    return {
+      date: $("fDate").value, role: F.role, client: F.client, matter: [F.matter, currentCase()].join("\u0001"),
+      activity: F.activity, time: minutesValue(), desc: $("fDesc").value.trim(),
+      cost: C.parseMoney($("fCost").value).value || null, fee: C.parseMoney($("fFee").value).value || null,
+      covered: $("fCovered").checked && !$("fCovered").disabled,
+    };
+  }
+  function markChanges() {
+    const e = S.editing;
+    const fields = { date: [$("fDate").parentElement], role: [], client: [$("fClient")], matter: [$("fMatter"), $("fCase")],
+      activity: [$("fActivity")], time: [$("fHours").parentElement, $("fMins").parentElement], desc: [$("fDesc")],
+      cost: [$("fCost").parentElement], fee: [$("fFee").parentElement], covered: [] };
+    const labels = { date: "DATE", role: "ROLE", client: "CLIENT", matter: "MATTER", activity: "ACTIVITY", time: "LENGTH OF TIME",
+      desc: "DESCRIPTION", cost: "OUT-OF-POCKET COST", fee: "FIXED FEE" };
+    const now = e ? formValues() : {};
+    const orig = e ? { date: e.date, role: e.role, client: e.client, matter: [e.matter, e.case || ""].join("\u0001"), activity: e.activity,
+      time: e.minutes, desc: e.description || "", cost: e.cost || null, fee: e.fee || null, covered: !!e.covered && !e.fee } : {};
+    const shown = { date: fmtUS, time: C.fmtDuration, cost: (v) => (v ? money(v) : "none"), fee: (v) => (v ? money(v) : "none"),
+      desc: (v) => (v.length > 30 ? v.slice(0, 30) + "…" : v || "blank"),
+      matter: (v) => { const [mt, cs] = v.split("\u0001"); return C.matterDisplay(S.model.caseIdx, e.client, mt, cs); } };
+    for (const k of Object.keys(fields)) {
+      const changed = !!e && now[k] !== orig[k];
+      const lab = document.querySelector(`.lbl[data-f="${k}"]`);
+      if (lab && labels[k]) lab.innerHTML = esc(labels[k]) + (changed ? `<span class="was">was ${esc((shown[k] || String)(orig[k]))}</span>` : "");
+      for (const w of fields[k]) w.classList.toggle("changed", changed);
+    }
+    const cov = !!e && now.covered !== orig.covered;
+    $("coveredText").textContent = "Time covered by a fixed fee" + (cov ? ` (was ${orig.covered ? "on" : "off"})` : "");
+  }
+
+  // ---- save
+  function formMsg(text, ok) {
+    const el = $("formMsg");
+    el.textContent = text;
+    el.className = "formmsg " + (ok ? "ok" : "err");
+    clearTimeout(formMsg.t);
+    formMsg.t = setTimeout(() => { if (el.textContent === text) el.textContent = ""; }, 6000);
+  }
+
+  async function save() {
+    if (timerStart()) {
+      const mins = timerMinutes();
+      const r = await dialog("Timer still running", `Stop the timer and use its time (${C.fmtDuration(mins)})?`,
+        [{ label: "Cancel" }, { label: "Stop & use", primary: true }]);
+      if (r !== "Stop & use") return;
+      stopTimer();
+    }
+    const m = S.model;
+    const minutes = minutesValue();
+    const raw = $("fDesc").value;
+    const oldDesc = (S.editing && S.editing.description) || "";
+    const norm = (s) => s.split(/\s+/).filter(Boolean).join(" ");
+    const desc = S.editing && norm(raw) === norm(oldDesc) ? oldDesc.trim() : C.tidyDescription(raw);
+    const cost = C.parseMoney($("fCost").value), fee = C.parseMoney($("fFee").value);
+    const feeVal = fee.value || null;
+    const v = { client: F.client, matter: F.matter, activity: F.activity, minutes, description: desc,
+      cost: cost.value, fee: feeVal, costError: cost.error, feeError: fee.error };
+    const err = C.validate(v);
+    if (err) { formMsg(err, false); return; }
+    const covered = $("fCovered").checked && !feeVal && minutes > 0;
+    const client = F.client, matter = F.matter, cs = currentCase();
+    if (!(m.lists.clients[client] || []).includes(matter)) {          // remember the pair, as on Windows
+      const l = S.ownLists.clients[client] = S.ownLists.clients[client] || [];
+      if (!l.includes(matter)) { l.push(matter); await saveOwnLists(); }
+    }
+    if (m.extra[client] && !m.ids[client]) {                          // a Client Intake client: keep its Client ID
+      S.ownLists.client_ids = S.ownLists.client_ids || {};
+      S.ownLists.client_ids[client] = { id: m.extra[client].id, at: C.isoNow(), by: S.settings.phoneName };
+      await saveOwnLists();
+    }
+    const values = { date: $("fDate").value || C.isoDate(), role: F.role, minutes, activity: F.activity, client, matter,
+      case: cs, description: desc, cost: cost.value, fee: feeVal, covered };
+    const u = unsynced();
+    if (S.editing) {
+      const id = S.editing.id;
+      const i = S.own.entries.findIndex((x) => x.id === id);
+      if (i >= 0) {
+        S.own.entries[i] = Object.assign({}, S.own.entries[i], values,
+          { modified_at: C.isoNow(), modified_on: S.settings.phoneName, version: `iPhone ${C.PHONE_APP_VERSION}` });
+        u.add(id);
+      }
+      finishEdit();
+      formMsg(`✓ Changes saved: ${client} / ${C.matterDisplay(m.caseIdx, client, matter, cs)} - ${values.activity}`, true);
+    } else {
+      const e = Object.assign({ id: C.newId(S.settings.phoneName) }, values, { entered_at: C.isoNow(),
+        computer: S.settings.phoneName, version: `iPhone ${C.PHONE_APP_VERSION}`, modified_at: null, modified_on: "" });
+      S.own.entries.push(e);
+      u.add(e.id);
+      const l = last();
+      l.client = client; l.matter[client] = matter; l.case[`${client}||${matter}`] = cs;
+      LS.set("last", l);
+      let extra = minutes ? C.fmtDuration(minutes) : "";
+      if (feeVal) extra += (extra ? ", " : "") + `fixed fee ${money(feeVal)}`;
+      if (cost.value) extra += (extra ? ", " : "") + `cost ${money(cost.value)}`;
+      formMsg(`✓ Saved: ${client} / ${C.matterDisplay(m.caseIdx, client, matter, cs)} - ${values.activity}, ${extra}`, true);
+      resetForm(true);
+    }
+    setUnsynced(u);
+    LS.set("ownDirty", true);
+    await saveOwn();
+    buildModel();
+    refreshCase();
+    renderRecent();
+    renderPill();
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    sync("save");
+  }
+  $("saveBtn").onclick = save;
+
+  // ---- editing this phone's own entries
+  function startEdit(e) {
+    S.editing = e;
+    document.body.classList.add("editing");
+    $("editBand").classList.remove("hidden");
+    $("editDetail").textContent = `${fmtDay(e.date)} · made on this phone`;
+    $("deleteBtn").classList.remove("hidden");
+    $("saveBtn").textContent = "Save changes";
+    $("saveBtn").classList.add("editing");
+    $("timerCard").classList.add("hidden");
+    $("pageTitle").textContent = "Edit entry";
+    $("fDate").value = e.date;
+    setRole(e.role || "Attorney");
+    setClient(e.client, e.matter);
+    if (F.matter !== e.matter) setMatter(e.matter);
+    refreshCase(e.case || "");
+    setActivity(e.activity);
+    setMinutes(e.minutes);
+    $("fDesc").value = e.description || "";
+    $("fCost").value = e.cost ? e.cost.toFixed(2) : "";
+    $("fFee").value = e.fee ? e.fee.toFixed(2) : "";
+    $("fCovered").checked = !!e.covered;
+    feeChanged();
+    updateTodayBtn();
+    showTab("new");
+    markChanges();
+    window.scrollTo({ top: 0 });
+  }
+
+  function finishEdit() {
+    S.editing = null;
+    document.body.classList.remove("editing");
+    $("editBand").classList.add("hidden");
+    $("deleteBtn").classList.add("hidden");
+    $("saveBtn").textContent = "Save entry";
+    $("saveBtn").classList.remove("editing");
+    $("timerCard").classList.remove("hidden");
+    if (!$("tab-new").classList.contains("hidden")) $("pageTitle").textContent = "New entry";
+    resetForm(false);
+  }
+  $("cancelEdit").onclick = () => { finishEdit(); formMsg("Edit cancelled - the entry was not changed.", true); };
+
+  $("deleteBtn").onclick = async () => {
+    const e = S.editing;
+    if (!e) return;
+    let what = `${fmtUS(e.date)}  ${e.client} / ${C.matterDisplay(S.model.caseIdx, e.client, e.matter, e.case)}  ${e.activity}`;
+    if (e.minutes) what += `  ${C.fmtDuration(e.minutes)}`;
+    if (e.fee) what += `  fixed fee ${money(e.fee)}`;
+    if (e.cost) what += `  cost ${money(e.cost)}`;
+    const r = await dialog("Delete this entry?", what, [{ label: "Cancel" }, { label: "Delete", danger: true }]);
+    if (r !== "Delete") return;
+    S.own.entries = S.own.entries.filter((x) => x.id !== e.id);
+    S.own.deleted[e.id] = { at: C.isoNow(), by: S.settings.phoneName };
+    const u = unsynced(); u.add(e.id); setUnsynced(u);
+    LS.set("ownDirty", true);
+    await saveOwn();
+    finishEdit();
+    buildModel();
+    renderRecent();
+    renderPill();
+    formMsg("✓ Entry deleted.", true);
+    sync("delete");
+  };
+
+  // ================================================================== timer
+  const timerStart = () => LS.get("timer");
+  const timerMinutes = () => Math.max(1, Math.ceil((Date.now() - timerStart()) / 60000));
+  function renderTimer() {
+    const st = timerStart();
+    const card = $("timerCard"), btn = $("timerBtn");
+    card.classList.toggle("run", !!st);
+    $("timerNote").classList.toggle("hidden", !st);
+    if (st) {
+      const s = Math.floor((Date.now() - st) / 1000);
+      $("timerClock").textContent = `${Math.floor(s / 3600)}:${String(Math.floor(s / 60) % 60).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+      $("timerLabel").textContent = `TIMER RUNNING · STARTED ${new Date(st).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }).toUpperCase()}`;
+      btn.className = "btn stop"; btn.textContent = "■ Stop";
+    } else {
+      $("timerClock").textContent = "0:00:00";
+      $("timerLabel").textContent = "TIMER";
+      btn.className = "btn start"; btn.textContent = "▶ Start";
+    }
+  }
+  function stopTimer() {
+    const mins = timerMinutes();
+    LS.del("timer");
+    setMinutes(mins);
+    renderTimer();
+    formMsg(`Timer stopped: ${C.fmtDuration(mins)} filled in.`, true);
+  }
+  $("timerBtn").onclick = () => {
+    if (timerStart()) stopTimer();
+    else { LS.set("timer", Date.now()); renderTimer(); }
+  };
+  setInterval(() => { if (timerStart()) renderTimer(); }, 1000);
+
+  // ================================================================== recent list
+  function renderRecent() {
+    if (!S.model) return;
+    const u = unsynced();
+    const rows = C.recent(S.model.entries);
+    const box = $("recentList");
+    if (!rows.length) { box.innerHTML = '<div class="empty">No entries yet.</div>'; return; }
+    let html = "", lastDay = null;
+    const today = C.isoDate();
+    for (const e of rows) {
+      if (e.date !== lastDay) {
+        lastDay = e.date;
+        html += `<div class="date">${e.date === today ? "TODAY · " : ""}${esc(fmtDay(e.date).toUpperCase())}</div>`;
+      }
+      const own = e.source === ownFileName();
+      const pend = own && u.has(e.id);
+      const notHourly = e.minutes && (e.fee || e.covered);
+      const amt = [];
+      if (e.minutes) amt.push(C.fmtDuration(e.minutes) + (notHourly ? " (fee)" : ""));
+      if (e.fee) amt.push(`fee ${money(e.fee)}`);
+      if (e.cost) amt.push(money(e.cost));
+      const who = own ? "THIS PHONE" : (e.computer || e.source.replace(/^Activity Data - |\.(xlsx|json)$/g, "")).toUpperCase();
+      html += `<button class="ent${pend ? " pend" : ""}" data-id="${esc(e.id)}">
+        <div class="l1"><span>${unlinked(e.client) ? '<span class="warn" title="Not in Client Intake yet">⚠ </span>' : ""}${esc(e.client)}<span class="src">${e.modified_at ? "✎ " : ""}${esc(who)}</span></span><span class="amt">${esc(amt.join(" · "))}</span></div>
+        <div class="l2">${esc(C.matterDisplay(S.model.caseIdx, e.client, e.matter, e.case))} · ${esc(e.activity)}${e.role === "Paralegal" ? " · Paralegal" : ""}</div>
+        <div class="l3">${pend ? "Waiting to be sent - saved on this phone" : esc(e.description || "")}</div></button>`;
+    }
+    box.innerHTML = html;
+    for (const b of box.querySelectorAll(".ent")) {
+      b.onclick = () => {
+        const e = S.model.entries.find((x) => x.id === b.dataset.id);
+        if (!e) return;
+        if (e.source === ownFileName()) {
+          const mine = S.own.entries.find((x) => x.id === e.id);
+          if (!mine) return;
+          const cur = {};          // current values: a computer may have corrected this entry
+          for (const k of ["date", "role", "minutes", "activity", "client", "matter", "case", "description", "cost", "fee", "covered"]) cur[k] = e[k];
+          startEdit(Object.assign({}, mine, cur));
+        } else {
+          dialog("Made on " + (e.computer || "another computer"),
+            `${fmtUS(e.date)} · ${e.client} / ${C.matterDisplay(S.model.caseIdx, e.client, e.matter, e.case)}\n${e.activity}${e.minutes ? " · " + C.fmtDuration(e.minutes) : ""}` +
+            `${e.description ? "\n" + e.description : ""}\n\nEntries from other computers can be changed on a computer (double-click the entry in Activity Entry).`);
+        }
+      };
+    }
+  }
+
+  // ================================================================== settings tab
+  function renderSettings() {
+    const info = D.info();
+    const ls = LS.get("lastSync");
+    const row = (k, v) => `<div class="set-row"><span class="k">${esc(k)}</span><span class="v">${esc(v)}</span></div>`;
+    $("settingsBody").innerHTML = `
+      <div class="set-title">THIS PHONE</div>
+      <div class="card">${row("Name", S.settings.phoneName)}${row("Saves to", "Data\\" + ownFileName())}${row("Entries made here", String(S.own.entries.length))}</div>
+      <div class="set-title">DROPBOX</div>
+      <div class="card">${row("Account", info.email || "—")}${row("Activity folder", folder())}${row("Last synced", ls ? fmtWhen(ls) : "not yet")}
+        ${row("Client Intake list", S.model && S.model.cl ? `${S.model.cl.active().length} clients` : "not found")}
+        ${row("Waiting to be sent", String(unsynced().size))}
+        <button id="setSync" class="btn secondary wide">Sync now</button>
+        <button id="setFind" class="btn secondary wide">Find the Activity folder</button></div>
+      <div class="set-title">SECURITY</div>
+      <div class="card"><div class="row toggle-row"><span>Face ID / Touch ID to open the app</span>
+        <label class="switch"><input id="setLock" type="checkbox" ${S.settings.lock ? "checked" : ""}><span></span></label></div>
+        <div class="hint">Asked when the app has not been used for 15 minutes.</div></div>
+      <div class="set-title">ABOUT</div>
+      <div class="card">${row("Version", C.PHONE_APP_VERSION)}${S.model && S.model.issues.length ? row("Notes", S.model.issues.length + " (tap below)") : ""}
+        ${S.model && S.model.issues.length ? '<button id="setIssues" class="btn secondary wide">Show notes</button>' : ""}
+        <button id="setUpdate" class="btn secondary wide">Check for an update</button>
+        <button id="setSignOut" class="btn danger wide">Sign out of Dropbox</button></div>`;
+    $("setSync").onclick = () => sync("manual");
+    $("setFind").onclick = () => setupFolder(true);
+    $("setLock").onchange = async (ev) => {
+      if (ev.target.checked) {
+        const ok = await registerLock();
+        ev.target.checked = ok;
+      } else { S.settings.lock = false; S.settings.credId = null; saveSettings(); }
+    };
+    if ($("setIssues")) $("setIssues").onclick = () => dialog("Notes", S.model.issues.join("\n\n"));
+    $("setUpdate").onclick = checkUpdate;
+    $("setSignOut").onclick = async () => {
+      const n = unsynced().size;
+      const r = await dialog("Sign out of Dropbox?", (n ? `${n} change${n === 1 ? " hasn't" : "s haven't"} been sent yet. They stay on this phone and are sent after you sign in again.\n\n` : "") +
+        "Entries stay on this phone.", [{ label: "Cancel" }, { label: "Sign out", danger: true }]);
+      if (r === "Sign out") { D.signOut(); location.reload(); }
+    };
+  }
+
+  // ================================================================== tabs
+  function showTab(t) {
+    for (const n of ["new", "recent", "settings"]) $("tab-" + n).classList.toggle("hidden", n !== t);
+    for (const b of document.querySelectorAll(".tabs button")) b.classList.toggle("on", b.dataset.tab === t);
+    $("pageTitle").textContent = { new: S.editing ? "Edit entry" : "New entry", recent: "Recent", settings: "Settings" }[t];
+    $("pageSub").textContent = t === "recent" ? `Last ${C.RECENT_COUNT} entries · all computers` : `${S.settings.phoneName} · Attorney`;
+    if (t === "recent") renderRecent();
+    if (t === "settings") renderSettings();
+    window.scrollTo({ top: 0 });
+  }
+  for (const b of document.querySelectorAll(".tabs button")) b.onclick = () => showTab(b.dataset.tab);
+
+  // ================================================================== Face ID / Touch ID lock (a passkey kept on this phone)
+  const b64u = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  const unb64u = (s) => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((s.length + 3) % 4)), (c) => c.charCodeAt(0));
+  async function lockAvailable() {
+    try { return !!(window.PublicKeyCredential && await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()); }
+    catch (e) { return false; }
+  }
+  async function registerLock() {
+    if (!(await lockAvailable())) { await dialog("Not available", "This phone can't use Face ID or Touch ID for web apps."); return false; }
+    try {
+      const cred = await navigator.credentials.create({ publicKey: {
+        challenge: crypto.getRandomValues(new Uint8Array(32)),
+        rp: { name: "Activity Entry" },
+        user: { id: crypto.getRandomValues(new Uint8Array(16)), name: `Activity Entry - ${S.settings.phoneName}`, displayName: `Activity Entry (${S.settings.phoneName})` },
+        pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }],
+        authenticatorSelection: { authenticatorAttachment: "platform", userVerification: "required", residentKey: "discouraged" },
+        timeout: 60000, attestation: "none" } });
+      S.settings.lock = true;
+      S.settings.credId = b64u(cred.rawId);
+      saveSettings();
+      touch();
+      return true;
+    } catch (e) {
+      await dialog("Face ID not set up", `It wasn't turned on (${e.name === "NotAllowedError" ? "cancelled" : e.message}). You can turn it on later in Settings.`);
+      return false;
+    }
+  }
+  const touch = () => LS.set("lastActive", Date.now());
+  function needsLock() { return !!S.settings.lock && Date.now() - (LS.get("lastActive") || 0) > LOCK_AFTER_MS; }
+  function showLock() { $("lock").classList.remove("hidden"); $("lockMsg").textContent = ""; }
+  async function unlock() {
+    try {
+      await navigator.credentials.get({ publicKey: { challenge: crypto.getRandomValues(new Uint8Array(32)),
+        allowCredentials: [{ type: "public-key", id: unb64u(S.settings.credId) }], userVerification: "required", timeout: 60000 } });
+      $("lock").classList.add("hidden");
+      touch();
+      sync("unlock");
+    } catch (e) {
+      $("lockMsg").innerHTML = 'Not unlocked - tap the button to try again.<br><br><button id="lockReset" class="linkbtn" style="color:#FFD8B5">Can\'t unlock? Sign in to Dropbox again</button>';
+      $("lockReset").onclick = () => { $("lock").classList.add("hidden"); setupSignIn("", "reset"); };
+    }
+  }
+  $("unlockBtn").onclick = unlock;
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") { if ($("lock").classList.contains("hidden")) touch(); return; }
+    if (S.settings.phoneName && D.signedIn()) {
+      if (needsLock()) showLock(); else touch();
+      if (C.isoDate() !== S.today) { S.today = C.isoDate(); if (!S.editing && $("fDate").value < S.today) { $("fDate").value = S.today; updateTodayBtn(); } }
+      renderTimer();
+      sync("visible");
+    }
+  });
+  ["touchstart", "click", "keydown"].forEach((ev) => document.addEventListener(ev, () => { if ($("lock").classList.contains("hidden")) touch(); }, { passive: true }));
+  window.addEventListener("online", () => { renderPill(); sync("online"); });
+  window.addEventListener("offline", renderPill);
+
+  // ================================================================== first-time setup
+  const appKey = () => CFG.dropboxAppKey || S.settings.appKey || "";
+
+  function setupView(html) {
+    $("main").classList.add("hidden");
+    $("setup").classList.remove("hidden");
+    $("setupBody").innerHTML = html;
+  }
+
+  /** mode: "setup" (first time), "again" (sign-in expired / signed out), "reset" (can't unlock with Face ID) */
+  function setupSignIn(msg, mode = "setup") {
+    const needKey = !CFG.dropboxAppKey;
+    const head = { setup: "STEP 1 OF 3 · DROPBOX", again: "SIGN IN TO DROPBOX", reset: "UNLOCK BY SIGNING IN TO DROPBOX" }[mode];
+    const intro = mode === "setup"
+      ? "Entries are saved in the firm's Dropbox, in <b>INVOICE MATTER\\Activity</b>, next to the computers' files. Sign in with the Dropbox account that has that folder."
+      : mode === "reset" ? "Sign in with this phone's Dropbox account to open the app. Face ID is then turned off - turn it on again in Settings."
+      : "Sign in with this phone's Dropbox account. Entries made meanwhile are kept on the phone and sent afterwards.";
+    setupView(`<div class="step">${head}</div>
+      <div class="card"><p>${intro}</p>
+      ${needKey ? `<div class="lbl">DROPBOX APP KEY</div><input id="suKey" class="field" value="${esc(S.settings.appKey || "")}" autocomplete="off" autocapitalize="none" autocorrect="off" placeholder="from the Dropbox App Console">` : ""}
+      <button id="suOpen" class="btn save wide">1. Open Dropbox sign-in</button>
+      <p class="hint" style="margin-top:12px">Dropbox opens in a browser view. Sign in, tap <b>Allow</b>, then copy the code it shows and come back here (tap Done).</p>
+      <div class="lbl mt">2. PASTE THE CODE FROM DROPBOX</div>
+      <input id="suCode" class="field" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="code">
+      ${msg ? `<div class="err">${esc(msg)}</div>` : ""}
+      <button id="suGo" class="btn save wide">Continue</button>
+      ${mode !== "setup" && S.settings.phoneName ? '<button id="suBack" class="btn secondary wide">Back</button>' : ""}</div>`);
+    $("suOpen").onclick = async () => {
+      if (needKey) {
+        const k = $("suKey").value.trim();
+        if (!k) return;
+        S.settings.appKey = k; saveSettings();
+      }
+      const url = await D.startSignIn(appKey());
+      if (!window.open(url, "_blank")) location.assign(url);
+    };
+    if ($("suBack")) $("suBack").onclick = () => { if (mode === "reset") showLock(); showMain(); };
+    $("suGo").onclick = async () => {
+      const code = $("suCode").value.trim();
+      if (!code) return;
+      const prev = D.info();
+      let id;
+      try { id = await D.finishSignIn(code); } catch (e) { return setupSignIn(e.message, mode); }
+      if (prev.account && id !== prev.account && S.settings.phoneName) {
+        LS.set("dbx", prev);
+        return setupSignIn("That is a different Dropbox account from the one this phone uses. Sign in with the firm's account.", mode);
+      }
+      if (mode === "reset") {
+        S.settings.lock = false; S.settings.credId = null; saveSettings();
+        touch();
+        toast("Face ID was turned off. Turn it on again in Settings.", 6000);
+      }
+      S.lastError = "";
+      if (!S.settings.folder) return setupFolder();
+      if (!S.settings.phoneName) return setupName();
+      try { await D.account(); } catch (e) { /* later */ }
+      if (!S.started) { await loadLocal(); startMain(); } else { showMain(); sync("signin"); }
+    };
+  }
+
+  function showMain() { $("setup").classList.add("hidden"); $("main").classList.remove("hidden"); }
+
+  /* Same rules as the computers (shared/firm_folder.py): the path in config.js, then CHRIS FOLDER/INVOICE MATTER
+     (or INVOICE MATTER) in each top-level folder, then Dropbox search. Only a folder with a Data folder counts;
+     one whose INVOICE MATTER has the "_FIRM DATA.txt" marker wins. Returns [{path, how, marker}], best first. */
+  const MARKER = "_FIRM DATA.txt";
+  async function activityCandidates() {
+    const out = [];
+    const check = async (p, how) => {
+      p = "/" + String(p || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+      if (p === "/" || out.some((c) => c.path.toLowerCase() === p.toLowerCase())) return;
+      const data = await D.metadata(`${p}/Data`);
+      if (!data || data[".tag"] !== "folder") return;
+      const a = await D.metadata(p);
+      const im = a.path_display.replace(/\/[^/]*$/, "");
+      out.push({ path: a.path_display, how, marker: !!(await D.metadata(`${im}/${MARKER}`)) });
+    };
+    if (CFG.activityFolder) await check(CFG.activityFolder, "the firm's usual folder");
+    if (!out.length) {
+      await check("/CHRIS FOLDER/INVOICE MATTER/Activity", "the usual place");
+      await check("/INVOICE MATTER/Activity", "the top of Dropbox");
+      if (!out.length) {
+        const top = (await D.listFolder("")).filter((m) => m[".tag"] === "folder").slice(0, 60);
+        for (const f of top) await check(`${f.path_display}/INVOICE MATTER/Activity`, `in ${f.name}`);
+      }
+    }
+    if (!out.length) {
+      const hits = await D.search("INVOICE MATTER");
+      for (const m of hits.filter((m) => m[".tag"] === "folder" && m.name.toLowerCase() === "invoice matter"))
+        await check(`${m.path_display}/Activity`, "found by searching Dropbox");
+    }
+    const marked = out.filter((c) => c.marker);
+    return marked.length ? marked : out;
+  }
+
+  async function setupFolder(again) {
+    const head = again ? "ACTIVITY FOLDER" : "STEP 2 OF 3 · ACTIVITY FOLDER";
+    setupView(`<div class="step">${head}</div><div class="card"><p>Looking for CHRIS FOLDER\\INVOICE MATTER\\Activity in Dropbox…</p></div>`);
+    let cands = [];
+    try { await D.account(); cands = await activityCandidates(); } catch (e) { return setupSignIn(e.message, again ? "again" : "setup"); }
+    let found = cands.length ? cands[0].path : (S.settings.folder || "");
+    const draw = (msg, ok) => {
+      const choices = cands.length > 1 ? `<p class="hint">${cands.length} possible folders were found - tap the firm's (normally the one in CHRIS FOLDER):</p>` +
+        cands.map((c, i) => `<button class="opt" data-i="${i}"><span>${esc(c.path)} <span class="osub">${esc(c.how)}</span></span></button>`).join("") : "";
+      setupView(`<div class="step">${head}</div>
+        <div class="card"><p>Signed in as <b>${esc(D.info().email || "")}</b>.</p>
+        ${choices}
+        <div class="lbl mt">ACTIVITY FOLDER IN DROPBOX</div>
+        <input id="suFolder" class="field" value="${esc(found)}" placeholder="/CHRIS FOLDER/INVOICE MATTER/Activity" autocomplete="off" autocapitalize="none" autocorrect="off">
+        ${msg ? `<div class="${ok ? "okmsg" : "err"}">${esc(msg)}</div>` : ""}
+        <p class="hint">${cands.length === 1 ? `Found (${esc(cands[0].how)}) - check it is the right one.` : cands.length ? "" : "Couldn't find it automatically - type the path as it appears in Dropbox, e.g. /CHRIS FOLDER/INVOICE MATTER/Activity."}</p>
+        <button id="suNext" class="btn save wide">${again ? "Use this folder" : "Next"}</button>
+        ${again ? '<button id="suBack" class="btn secondary wide">Back</button>' : ""}</div>`);
+      for (const b of document.querySelectorAll("#setupBody .opt")) b.onclick = () => { found = cands[+b.dataset.i].path; draw(); };
+      if ($("suBack")) $("suBack").onclick = () => { showMain(); showTab("settings"); };
+      $("suNext").onclick = async () => {
+        const p = "/" + $("suFolder").value.trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+        let meta = null;
+        try { meta = await D.metadata(p); } catch (e) { return draw(e.message); }
+        if (!meta || meta[".tag"] !== "folder") { found = $("suFolder").value; return draw("That folder doesn't exist in this Dropbox."); }
+        const data = await D.metadata(`${p}/Data`);
+        if (!data) { found = p; return draw("That folder has no Data folder - is it the Activity folder?"); }
+        const changed = S.settings.folder && S.settings.folder.toLowerCase() !== meta.path_display.toLowerCase();
+        S.settings.folder = meta.path_display;
+        saveSettings();
+        if (again || S.started) {
+          if (changed) { S.files = {}; await idb.set("files", S.files); LS.del("ownRev"); LS.del("ownListsRev"); LS.set("ownDirty", true); LS.set("ownListsDirty", true); }
+          S.lastError = "";
+          showMain(); showTab("settings"); sync("folder");
+          return;
+        }
+        setupName();
+      };
+    };
+    draw();
+  }
+
+  async function setupName(msg) {
+    if (S.settings.phoneName) return setupLock();
+    let files = [];
+    try { files = (await D.listFolder(`${folder()}/Data`)).filter((m) => m[".tag"] === "file").map((m) => m.name); } catch (e) { msg = e.message; }
+    const taken = (n) => files.find((f) => f.toLowerCase() === `${C.DATA_PREFIX}${C.safeName(n)}`.toLowerCase() + ".xlsx");
+    const phone = (n) => files.find((f) => f.toLowerCase() === `${C.DATA_PREFIX}${C.safeName(n)}`.toLowerCase() + ".json");
+    const computers = files.filter((f) => /\.(xlsx|json)$/i.test(f) && f.startsWith(C.DATA_PREFIX) && !/conflicted copy/i.test(f))
+      .map((f) => f.slice(C.DATA_PREFIX.length).replace(/\.(xlsx|json)$/i, ""));
+    setupView(`<div class="step">STEP 3 OF 3 · THIS PHONE'S NAME</div>
+      <div class="card"><p>Give this phone a short name, different from the computers and other phones - e.g. <b>Chris iPhone</b>.
+        Its entries are saved as <b>Data\\Activity Data - <i>name</i>.json</b>.</p>
+      <div class="lbl">PHONE NAME</div>
+      <input id="suName" class="field" autocomplete="off" autocapitalize="words" placeholder="e.g. Chris iPhone">
+      ${computers.length ? `<p class="hint">Already used: ${esc(computers.join(", "))}</p>` : ""}
+      ${msg ? `<div class="err">${esc(msg)}</div>` : ""}
+      <button id="suNext" class="btn save wide">Next</button></div>`);
+    $("suNext").onclick = async () => {
+      const n = $("suName").value.split(/\s+/).filter(Boolean).join(" ");
+      if (!n) return;
+      if (taken(n)) return setupName(`'${n}' is already used by a computer. Choose another name.`);
+      if (phone(n)) {
+        const r = await dialog("Phone already set up", `A phone called '${n}' is already set up. If this IS that phone (for example after reinstalling the app), continue and its entries come back. Otherwise choose another name - two phones must never share a name.`,
+          [{ label: "Other name" }, { label: "It's this phone", primary: true }]);
+        if (r !== "It's this phone") return;
+      }
+      S.settings.phoneName = n;
+      saveSettings();
+      setupLock();
+    };
+  }
+
+  async function setupLock() {
+    const avail = await lockAvailable();
+    setupView(`<div class="step">ALMOST DONE</div>
+      <div class="card"><p>${avail ? "Use <b>Face ID</b> (or Touch ID / passcode) to open the app? It is asked when the app has not been used for 15 minutes."
+        : "This phone can't use Face ID for web apps, so the app opens without it."}</p>
+      ${avail ? `<div class="row toggle-row"><span>Face ID / Touch ID</span><label class="switch"><input id="suLock" type="checkbox" checked><span></span></label></div>` : ""}
+      <button id="suDone" class="btn save wide">Start</button></div>`);
+    $("suDone").onclick = async () => {
+      if (avail && $("suLock").checked) await registerLock();
+      await finishSetup();
+    };
+  }
+
+  async function finishSetup() {
+    setupView(`<div class="card"><p>Getting the client lists and recent entries…</p></div>`);
+    await loadLocal();
+    try {
+      const meta = await D.metadata(ownPath());
+      if (meta) {                                  // reinstalled: bring this phone's entries back
+        const remote = JSON.parse(new TextDecoder().decode((await D.download(ownPath())).buffer));
+        if (remote && remote.format === C.PHONE_FORMAT) { S.own = C.mergeOwn(S.own, remote); LS.set("ownRev", meta.rev); }
+      }
+      const lm = await D.metadata(ownListsPath());
+      if (lm) { S.ownLists = mergeLists(JSON.parse(new TextDecoder().decode((await D.download(ownListsPath())).buffer)), S.ownLists); LS.set("ownListsRev", lm.rev); }
+      await idb.set("own", S.own);
+      await idb.set("ownLists", S.ownLists);
+    } catch (e) { /* offline: carry on, sync later */ }
+    touch();
+    startMain();
+  }
+
+  // ================================================================== start
+  function startMain() {
+    S.started = true;
+    showMain();
+    S.today = C.isoDate();
+    buildModel();
+    resetForm(false);
+    renderTimer();
+    renderRecent();
+    renderPill();
+    showTab("new");
+    if (needsLock()) { showLock(); setTimeout(unlock, 300); } else touch();
+    sync("start");
+    setInterval(() => { if (document.visibilityState === "visible") sync("timer"); }, SYNC_EVERY_MS);
+  }
+
+  async function checkUpdate() {
+    const reg = navigator.serviceWorker && await navigator.serviceWorker.getRegistration();
+    if (!reg) return location.reload();
+    await reg.update();
+    if (reg.waiting) { reg.waiting.postMessage("skipWaiting"); return; }
+    toast("You have the latest version.");
+  }
+
+  function registerSW() {
+    if (!("serviceWorker" in navigator) || window.AE_TEST_DROPBOX) return;
+    navigator.serviceWorker.register("sw.js").then((reg) => {
+      const offer = () => {
+        if (!reg.waiting) return;
+        dialog("Update ready", "A new version of Activity Entry is ready.", [{ label: "Later" },
+          { label: "Restart now", primary: true, fn: () => reg.waiting && reg.waiting.postMessage("skipWaiting") }]);
+      };
+      if (reg.waiting) offer();
+      reg.addEventListener("updatefound", () => {
+        const w = reg.installing;
+        if (w) w.addEventListener("statechange", () => { if (w.state === "installed" && navigator.serviceWorker.controller) offer(); });
+      });
+    });
+    let reloaded = false;
+    navigator.serviceWorker.addEventListener("controllerchange", () => { if (!reloaded) { reloaded = true; location.reload(); } });
+  }
+
+  async function boot() {
+    registerSW();
+    try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) { /* optional */ }
+    if (!D.signedIn()) return setupSignIn("", S.settings.phoneName ? "again" : "setup");
+    if (!S.settings.folder) return setupFolder();
+    if (!S.settings.phoneName) return setupName();
+    await loadLocal();
+    startMain();
+  }
+
+  window.AEApp = { S, sync, buildModel, showTab };     // for testing
+  boot();
 })();

@@ -6,229 +6,168 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
-<meta name="apple-mobile-web-app-title" content="Support Calculator">
-<meta name="theme-color" content="#1F3A5F">
-<meta name="format-detection" content="telephone=no">
-<title>Support Calculator</title>
+<meta name="apple-mobile-web-app-title" content="Activity">
+<meta name="theme-color" content="#F5F7FA">
+<title>Activity Entry</title>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icons/icon-180.png">
 <link rel="icon" type="image/png" href="icons/favicon-64.png">
 <link rel="stylesheet" href="app.css">
-<script>
-/* Start-up guard: if a file doesn't load or the program stops, say so on the screen (with a Repair button that
-   clears this app's saved copy and loads it fresh), instead of leaving a page whose buttons do nothing. */
-(function () {
-  var shown = false;
-  function show(msg) {
-    if (shown) return;
-    shown = true;
-    function put() {
-      var d = document.createElement("div");
-      d.className = "boot-error";
-      d.innerHTML = "<b>" + (window.SC_STARTED ? "Something went wrong." : "The app didn't start.") + "</b>" +
-        "<div class='be-msg'></div><button type='button'>Repair and reload</button>";
-      d.querySelector(".be-msg").textContent = msg + "  [version " + (window.APP_VERSION || "1.2.0") + "]";
-      d.querySelector("button").onclick = window.SC_REPAIR;
-      document.body.appendChild(d);
-    }
-    if (document.body) put(); else document.addEventListener("DOMContentLoaded", put);
-  }
-  window.SC_FAIL = show;
-  window.SC_REPAIR = function () {
-    var here = new URL("./", location.href).href, jobs = [];
-    try {
-      if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations)
-        jobs.push(navigator.serviceWorker.getRegistrations().then(function (rs) {
-          return Promise.all(rs.filter(function (r) { return r.scope.indexOf(here) === 0; })
-            .map(function (r) { return r.unregister(); }));
-        }));
-      if (window.caches) jobs.push(caches.keys().then(function (ks) {
-        return Promise.all(ks.filter(function (k) { return k.indexOf("nj-estimate-") === 0; })
-          .map(function (k) { return caches.delete(k); }));
-      }));
-    } catch (e) { /* carry on and reload */ }
-    Promise.all(jobs).catch(function () {}).then(function () { location.replace(location.pathname + "?r=" + Date.now()); });
-  };
-  window.addEventListener("error", function (e) {
-    if (e && e.message) show(e.message + (e.filename ? " – " + e.filename.split("/").pop() + " line " + e.lineno : ""));
-  });
-})();
-</script>
 </head>
 <body>
 
-<!-- the answer, always in view on Child support; the page's name on the other tabs -->
-<header class="top">
-  <h1 id="pageTitle" class="ttl">Child support</h1>
-  <button id="answer" class="answer" type="button" aria-live="polite">
-    <span id="aBig" class="a-big">–</span><span id="aSub" class="a-sub"></span>
+<!-- ============ lock screen ============ -->
+<div id="lock" class="lock hidden">
+  <img class="lock-icon" src="icons/stopwatch.png" alt="">
+  <div class="lock-title">Activity Entry</div>
+  <button id="unlockBtn" class="unlock">
+    <svg viewBox="0 0 48 48" width="46" height="46" aria-hidden="true"><g fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round"><path d="M6 15V9a3 3 0 0 1 3-3h6M33 6h6a3 3 0 0 1 3 3v6M42 33v6a3 3 0 0 1-3 3h-6M15 42H9a3 3 0 0 1-3-3v-6"/><path d="M17 18v3M31 18v3M24 18v9h-2M18 32c3.5 3 8.5 3 12 0"/></g></svg>
   </button>
-</header>
-
-<div class="staterow" id="stateRow">
-  <div class="seg state" id="state"><button data-v="NJ" class="on">New Jersey</button><button data-v="NY">New York</button></div>
-</div>
-<div class="pagehead" id="pageHead">
-  <div id="pageSub" class="sub"></div>
-  <button id="clearBtn" class="textbtn">Start over</button>
+  <div class="lock-text">Unlock with Face ID</div>
+  <div class="lock-sub">(Touch ID or passcode on phones without it)</div>
+  <div id="lockMsg" class="lock-msg"></div>
 </div>
 
-<!-- ============ child support ============ -->
-<section id="tab-support" class="page">
-  <div class="seg modeseg" id="mode"><button data-v="simple" class="on">Simple</button><button data-v="full">Full detail</button></div>
-
-  <div class="card">
-    <div class="ctitle">1. How many children, and how old?</div>
-    <div class="chips" id="kidCount"></div>
-    <div id="kids"></div>
-    <div class="hint nj-only">Type an age, or tap <i>Birth date</i>. Turn off <i>Counted</i> for a child outside the guidelines
-      (18 or over and out of high school).</div>
-    <div class="hint ny-only">Type an age, or tap <i>Birth date</i>. New York child support runs to 21: turn off
-      <i>Counted</i> for a child who is emancipated.</div>
+<!-- ============ first-time setup ============ -->
+<div id="setup" class="screen setup hidden">
+  <div class="setup-head">
+    <img src="icons/stopwatch.png" alt="" class="setup-icon">
+    <h1>Activity Entry</h1>
+    <div class="sub">Set up this phone</div>
   </div>
+  <div id="setupBody" class="setup-body"></div>
+</div>
 
-  <div class="card">
-    <div class="ctitle">2. What does each parent earn, before tax?</div>
-    <div id="earn"></div>
-    <div id="weekHint" class="hint hidden"></div>
-  </div>
-
-  <div class="card nj-only">
-    <div class="ctitle">3. How much time do the children spend with each parent?</div>
-    <div class="lbl">The children live mainly with</div>
-    <div class="seg" id="mainWith"><button data-v="client" class="on">Client</button><button data-v="other">Other party</button></div>
-    <div class="lbl mt" id="presetLbl">Time with Other party</div>
-    <div class="presets" id="presets"></div>
-    <div class="two mt" id="nights"></div>
-    <div class="hint">A button fills in both numbers. Type over either one; the two need not add up to 365.</div>
-  </div>
-
-  <!-- New York (1.2.0): who the children live with decides who is custodial; maintenance comes first -->
-  <div class="card ny-only">
-    <div class="ctitle">3. Who do the children mainly live with?</div>
-    <div class="seg" id="nyMain"><button data-v="client" class="on">Client</button><button data-v="other">Other party</button><button data-v="equal">Equal time</button></div>
-    <div class="hint">In New York the time with each parent doesn't change the amount: it decides who receives child
-      support. Equal time: the parent with the higher income pays.</div>
-  </div>
-  <div class="card ny-only">
-    <div class="ctitle">4. Maintenance</div>
-    <div class="presets" id="nyMaint">
-      <button data-v="post"><b>Guideline, after the divorce</b><span>Post-divorce worksheet</span></button>
-      <button data-v="temporary"><b>Temporary</b><span>While the case is pending</span></button>
-      <button data-v="agreed"><b>An amount agreed or ordered</b><span>Type it below</span></button>
-      <button data-v="none"><b>None</b><span>Child support only</span></button>
+<!-- ============ main app ============ -->
+<div id="main" class="hidden">
+  <header class="top">
+    <div>
+      <h1 id="pageTitle">New entry</h1>
+      <div id="pageSub" class="sub"></div>
     </div>
-    <div id="nyMaintAmt" class="fld hidden"><div class="lbl">Maintenance agreed or ordered</div>
-      <div class="inrow"><label class="field"><span class="unit">$</span><input id="ny_maint_amount" type="text" inputmode="decimal" autocomplete="off" placeholder="0.00"></label><div class="seg per" id="ny_maint_per"><button data-v="annual" class="on">a year</button><button data-v="monthly">a month</button></div></div></div>
-    <div class="hint">Worked out first; child support then uses the incomes after maintenance.</div>
-  </div>
+    <button id="syncPill" class="pill ok">✓ Synced</button>
+  </header>
 
-  <div id="nyFullCards" class="hidden">
+  <!-- ---- New entry ---- -->
+  <section id="tab-new" class="page">
+    <div id="editBand" class="editband hidden">
+      <div><b>✎ EDITING ENTRY</b><div id="editDetail" class="editdetail"></div></div>
+      <button id="cancelEdit" class="bandbtn">Cancel</button>
+    </div>
+
+    <div id="timerCard" class="card timer">
+      <div class="timer-left">
+        <div id="timerLabel" class="lbl">TIMER</div>
+        <div id="timerClock" class="tclock">0:00:00</div>
+        <div id="timerNote" class="tnote hidden">Keeps counting if you leave the app. Stop fills in the time.</div>
+      </div>
+      <button id="timerBtn" class="btn start">▶ Start</button>
+    </div>
+
     <div class="card">
-      <div class="ctitle">5. Adjustments</div>
-      <div class="seg" id="nyAdjWho"><button data-v="client" class="on">Client</button><button data-v="other">Other party</button></div>
-      <div id="nyAdj"></div>
-      <div class="hint">Amounts a year, as in the Annual Income Worksheet (UD-8(1)). Federal and state income taxes are
-        not deducted in New York.</div>
+      <div class="two">
+        <div>
+          <div class="lbl" data-f="date">DATE</div>
+          <div class="field datefield"><input id="fDate" type="date"><span class="chev">▾</span></div>
+          <button id="todayBtn" class="linkbtn hidden">Today</button>
+        </div>
+        <div>
+          <div class="lbl" data-f="role">ROLE</div>
+          <div class="seg" id="fRole"><button data-v="Attorney" class="on">Attorney</button><button data-v="Paralegal">Paralegal</button></div>
+        </div>
+      </div>
     </div>
+
     <div class="card">
-      <div class="ctitle">How it is worked out</div>
-      <div id="nySettings"></div>
+      <div class="lbl" data-f="client">CLIENT</div>
+      <button id="fClient" class="field pick"><span class="ph">Choose client</span><span class="chev">▾</span></button>
+      <div class="two mt">
+        <div>
+          <div class="lbl" data-f="matter">MATTER</div>
+          <button id="fMatter" class="field pick"><span class="ph">Choose matter</span><span class="chev">▾</span></button>
+        </div>
+        <div id="caseWrap" class="casewrap hidden">
+          <div class="lbl" data-f="case">CASE</div>
+          <button id="fCase" class="field pick"><span></span><span class="chev">▾</span></button>
+        </div>
+      </div>
+      <div class="lbl mt" data-f="activity">ACTIVITY</div>
+      <button id="fActivity" class="field pick"><span></span><span class="chev">▾</span></button>
     </div>
-  </div>
 
-  <div id="fullCards" class="hidden">
     <div class="card">
-      <div class="ctitle">4. Adjustments</div>
-      <div class="seg" id="adjWho"><button data-v="client" class="on">Client</button><button data-v="other">Other party</button></div>
-      <div id="adj"></div>
-      <div class="hint">Weekly amounts unless marked yearly.</div>
+      <div class="lbl" data-f="time">LENGTH OF TIME</div>
+      <div class="row">
+        <label class="field num"><input id="fHours" type="number" inputmode="numeric" min="0" max="24" placeholder="0"><span class="unit">h</span></label>
+        <label class="field num"><input id="fMins" type="number" inputmode="numeric" min="0" max="59" placeholder="0"><span class="unit">min</span></label>
+      </div>
+      <div class="chips">
+        <button data-m="6">6m</button><button data-m="15">15m</button><button data-m="30">30m</button><button data-m="60">1h</button>
+      </div>
     </div>
+
     <div class="card">
-      <div class="ctitle">How it is worked out</div>
-      <div id="settings"></div>
+      <div class="lbl" data-f="desc">DESCRIPTION</div>
+      <textarea id="fDesc" class="field area" rows="3" autocapitalize="sentences" autocorrect="on" spellcheck="true"
+        placeholder="Optional - required for 'Other'"></textarea>
     </div>
-  </div>
 
-  <div id="hiddenNote" class="banner warn hidden"></div>
-  <div id="switchBox" class="dashed">
-    <div id="switchText">Alimony, child care, health insurance, other children, or taxes typed from a return?</div>
-    <button id="toFull" class="btn secondary">Switch to Full detail</button>
-  </div>
-
-  <div id="result" class="card resultcard">
-    <div class="ctitle">Estimate</div>
-    <div id="big" class="rbig">–</div>
-    <div id="summary" class="rsub"></div>
-    <div id="nyRows" class="hidden"></div>
-    <div class="rbtns">
-      <button id="sheetBtn" class="btn save">See the worksheet</button>
-      <button id="shareBtn" class="btn secondary">Share</button>
+    <div class="card">
+      <div class="two">
+        <div>
+          <div class="lbl" data-f="cost">OUT-OF-POCKET COST</div>
+          <label class="field money"><span class="unit">$</span><input id="fCost" type="text" inputmode="decimal" placeholder="0.00"></label>
+        </div>
+        <div>
+          <div class="lbl" data-f="fee">FIXED FEE</div>
+          <label class="field money"><span class="unit">$</span><input id="fFee" type="text" inputmode="decimal" placeholder="0.00"></label>
+        </div>
+      </div>
+      <div class="row toggle-row mt">
+        <span id="coveredText" data-f="covered">Time covered by a fixed fee</span>
+        <label class="switch"><input id="fCovered" type="checkbox"><span></span></label>
+      </div>
+      <div id="coveredHint" class="hint">Recorded, but not billed by the hour.</div>
     </div>
-  </div>
-  <div id="check" class="banner warn hidden"></div>
-  <div id="whatifCard" class="card hidden">
-    <div class="ctitle">What would change it</div>
-    <div id="whatif"></div>
-  </div>
-  <div class="card">
-    <div class="ctitle">Assumed</div>
-    <div id="assumed" class="small"></div>
-  </div>
-  <div class="spacer"></div>
-</section>
 
-<!-- ============ alimony ============ -->
-<section id="tab-alimony" class="page hidden">
-  <div class="card">
-    <div class="ctitle">Gross income of each party</div>
-    <div id="alEarn"></div>
-    <button id="alFrom" class="linkbtn">Use the figures from the child support estimate</button>
-    <div class="hint">Before tax. Filled from the child support estimate (blue) when it has them; type over either figure.</div>
-  </div>
-  <div class="card">
-    <div class="ctitle">Sample alimony</div>
-    <div id="alDiff" class="big2"></div>
-    <div id="alWho" class="hint"></div>
-    <table class="altable" id="alTable"></table>
-    <button id="alShare" class="btn secondary wide">Share</button>
-  </div>
-  <div class="note">New Jersey has no formula for alimony – the court weighs the statutory factors. These are sample
-    figures by a rule of thumb, for discussion: 20%, 25% and 30% of the difference between the two gross incomes.</div>
-  <div class="spacer"></div>
-</section>
+    <div id="formMsg" class="formmsg"></div>
+    <div class="actions">
+      <button id="deleteBtn" class="btn danger hidden">Delete</button>
+      <button id="saveBtn" class="btn save">Save entry</button>
+    </div>
+    <div class="spacer"></div>
+  </section>
 
-<!-- ============ about ============ -->
-<section id="tab-about" class="page hidden">
-  <div class="card">
-    <img src="icons/logo.png" alt="" class="about-icon">
-    <div class="ctitle center">Support Calculator</div>
-    <div class="small" id="aboutText"></div>
-  </div>
-  <div class="spacer"></div>
-</section>
+  <!-- ---- Recent ---- -->
+  <section id="tab-recent" class="page hidden">
+    <div id="recentList"></div>
+    <div class="hint center">Tap an entry made on this phone to edit or delete it</div>
+    <div class="spacer"></div>
+  </section>
 
-<nav class="tabs">
-  <button data-tab="support" class="on"><span class="ic"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v17M7 20h10M5 7h14M5 7l-3 6a3 3 0 006 0zM19 7l-3 6a3 3 0 006 0z"/></svg></span>Support</button>
-  <button data-tab="alimony"><span class="ic"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 18L18 6"/><circle cx="7.5" cy="7.5" r="2.5"/><circle cx="16.5" cy="16.5" r="2.5"/></svg></span>Alimony</button>
-  <button data-tab="about"><span class="ic"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.5"/></svg></span>About</button>
-</nav>
+  <!-- ---- Settings ---- -->
+  <section id="tab-settings" class="page hidden">
+    <div id="settingsBody"></div>
+    <div class="spacer"></div>
+  </section>
 
+  <nav class="tabs">
+    <button data-tab="new" class="on"><span class="ic">✚</span>New</button>
+    <button data-tab="recent"><span class="ic">☰</span>Recent</button>
+    <button data-tab="settings"><span class="ic">⚙︎</span>Settings</button>
+  </nav>
+</div>
 
-<!-- worksheet -->
+<!-- picker sheet -->
 <div id="sheet" class="sheet hidden">
   <div class="sheet-card">
-    <div class="sheet-head"><b id="sheetTitle">Worksheet</b><button id="sheetClose" class="linkbtn">Done</button></div>
-    <div id="sheetBody" class="sheet-body"></div>
-    <div class="sheet-btns">
-      <button id="sheetShare" class="btn save">Share</button>
-      <button id="sheetCopy" class="btn secondary">Copy</button>
-      <button id="sheetPrint" class="btn secondary">Print</button>
-    </div>
+    <div class="sheet-head"><b id="sheetTitle"></b><button id="sheetClose" class="linkbtn">Done</button></div>
+    <input id="sheetSearch" class="field search" type="search" placeholder="Search" autocomplete="off" autocorrect="off">
+    <div id="sheetList" class="sheet-list"></div>
   </div>
 </div>
-<pre id="printText" class="print-only"></pre>
 
+<!-- dialog -->
 <div id="dialog" class="dialog hidden">
   <div class="dialog-card">
     <div id="dialogTitle" class="dialog-title"></div>
@@ -236,17 +175,14 @@
     <div id="dialogBtns" class="dialog-btns"></div>
   </div>
 </div>
+
 <div id="toast" class="toast hidden"></div>
 
-<script src="js/tables.js" onerror="SC_FAIL('js/tables.js could not be loaded from the web site.')"></script>
-<script src="js/engine.js" onerror="SC_FAIL('js/engine.js could not be loaded from the web site.')"></script>
-<script src="js/engine-ny.js" onerror="SC_FAIL('js/engine-ny.js could not be loaded from the web site.')"></script>
-<script src="js/app.js" onerror="SC_FAIL('js/app.js could not be loaded from the web site.')"></script>
-<script>
-  if (!window.NJ_DATA) SC_FAIL("js/tables.js didn't load (is the js folder on the web site?)");
-  else if (!window.NJ) SC_FAIL("js/engine.js didn't load (is the js folder on the web site?)");
-  else if (!window.NY) SC_FAIL("js/engine-ny.js didn't load (is the js folder on the web site?)");
-  else if (!window.NJApp) SC_FAIL("js/app.js didn't load (is the js folder on the web site?)");
-</script>
+<script src="config.js"></script>
+<script src="js/xlsx.mini.min.js"></script>
+<script src="js/names.js"></script>
+<script src="js/core.js"></script>
+<script src="js/dropbox.js"></script>
+<script src="js/app.js"></script>
 </body>
 </html>
